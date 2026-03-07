@@ -7,6 +7,7 @@ mod cleanup;
 mod config;
 mod hotkey;
 mod paste;
+mod server;
 mod store;
 mod whisper;
 
@@ -32,6 +33,10 @@ fn main() -> eframe::Result<()> {
     let (event_tx, event_rx) = bounded::<AppEvent>(32);
     let (cmd_tx, _cmd_rx) = bounded::<()>(8);
     let (hotkey_tx, hotkey_rx) = bounded::<hotkey::HotkeyEvent>(8);
+
+    // ── Local Whisper server (auto-start when provider = Local) ───────────────
+    // Keep _whisper_server alive until the app exits — Drop kills the process.
+    let _whisper_server = maybe_start_local_server(&config, &event_tx);
 
     // ── Hotkey polling thread ─────────────────────────────────────────────────
     hotkey::start_polling(config.record_key.clone(), hotkey_tx);
@@ -169,6 +174,55 @@ fn main() -> eframe::Result<()> {
             )))
         }),
     )
+}
+
+// ── Local server management ───────────────────────────────────────────────────
+
+fn maybe_start_local_server(
+    config: &Config,
+    event_tx: &crossbeam_channel::Sender<AppEvent>,
+) -> Option<server::WhisperServer> {
+    use config::WhisperProvider;
+
+    if config.whisper_provider != WhisperProvider::Local {
+        return None;
+    }
+
+    let server_py = match server::find_server_py() {
+        Some(p) => p,
+        None => {
+            let _ = event_tx.send(AppEvent::Error(
+                "whisper-server/server.py not found next to phonix.exe".into(),
+            ));
+            return None;
+        }
+    };
+
+    let _ = event_tx.send(AppEvent::StatusUpdate(
+        "Starting local Whisper server…".into(),
+    ));
+
+    let mut srv = server::WhisperServer::new();
+    if let Err(e) = srv.start(&server_py) {
+        let _ = event_tx.send(AppEvent::Error(e));
+        return None;
+    }
+
+    // Health-poll in background — updates status when ready
+    let tx = event_tx.clone();
+    let srv_ref = server::WhisperServer::new(); // dummy ref just for the wait helper
+    std::thread::spawn(move || {
+        match srv_ref.wait_until_ready(std::time::Duration::from_secs(60)) {
+            Ok(_) => {
+                let _ = tx.send(AppEvent::StatusUpdate("Ready — hold key to dictate".into()));
+            }
+            Err(e) => {
+                let _ = tx.send(AppEvent::Error(e));
+            }
+        }
+    });
+
+    Some(srv)
 }
 
 // ── Tray icon ─────────────────────────────────────────────────────────────────
