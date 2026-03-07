@@ -1,81 +1,93 @@
 use anyhow::Result;
-use arboard::Clipboard;
 
-/// Copy text to clipboard then paste into the window identified by `target_hwnd`.
-/// We restore focus to that window first — necessary because pressing a modifier
-/// key like Right Alt can steal focus from the target before we get here.
+/// Paste text into the window that was focused when recording started.
+///
+/// Strategy:
+///   1. Restore focus to `target_hwnd` (the window active at key-press time)
+///   2. Type each character via Unicode SendInput
+///
+/// We use Unicode keystroke injection rather than clipboard+Ctrl+V because it
+/// works in every app that accepts keyboard input — terminals, browsers,
+/// editors, games — without depending on the app supporting Ctrl+V or the
+/// clipboard being accessible.
 pub fn paste(text: &str, target_hwnd: u64) -> Result<()> {
-    let mut cb = Clipboard::new()?;
-    cb.set_text(text.to_owned())?;
-
-    // Restore focus to the window that was active when recording started
     if target_hwnd != 0 {
         focus_window(target_hwnd);
-        // Let the window process the focus event before we send Ctrl+V
-        std::thread::sleep(std::time::Duration::from_millis(120));
-    } else {
-        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Give the window time to process the focus event
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
 
-    send_ctrl_v();
+    type_text(text);
     Ok(())
 }
+
+// ── Windows implementation ────────────────────────────────────────────────────
 
 #[cfg(windows)]
 fn focus_window(hwnd: u64) {
     use windows::Win32::Foundation::HWND as WinHWND;
-    use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
 
     let hwnd = WinHWND(hwnd as *mut std::ffi::c_void);
     unsafe {
-        let _ = ShowWindow(hwnd, SW_RESTORE); // un-minimize if needed
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = BringWindowToTop(hwnd);
         let _ = SetForegroundWindow(hwnd);
     }
 }
 
 #[cfg(windows)]
-fn send_ctrl_v() {
+fn type_text(text: &str) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-        VK_CONTROL, VK_V,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     };
 
-    let key_down = KEYBD_EVENT_FLAGS(0);
+    // Encode as UTF-16. Surrogate pairs (emoji, etc.) need two events each.
+    let utf16: Vec<u16> = text.encode_utf16().collect();
 
-    let inputs: [INPUT; 4] = [
-        make_key(VK_CONTROL, key_down),
-        make_key(VK_V, key_down),
-        make_key(VK_V, KEYEVENTF_KEYUP),
-        make_key(VK_CONTROL, KEYEVENTF_KEYUP),
-    ];
-
-    unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
-}
-
-#[cfg(windows)]
-fn make_key(
-    vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
-    flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
-) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
-    use windows::Win32::UI::Input::KeyboardAndMouse::*;
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                wScan: 0,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
+    for &codeunit in &utf16 {
+        let inputs: [INPUT; 2] = [
+            // Key down
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
+                        wScan: codeunit,
+                        dwFlags: KEYEVENTF_UNICODE,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
             },
-        },
+            // Key up
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
+                        wScan: codeunit,
+                        dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0),
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+        ];
+
+        unsafe {
+            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        }
     }
 }
+
+// ── Non-Windows stubs ─────────────────────────────────────────────────────────
 
 #[cfg(not(windows))]
 fn focus_window(_hwnd: u64) {}
 
 #[cfg(not(windows))]
-fn send_ctrl_v() {}
+fn type_text(_text: &str) {}
