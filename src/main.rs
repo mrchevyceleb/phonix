@@ -76,7 +76,8 @@ fn main() -> eframe::Result<()> {
                                 let _ = event_tx.send(AppEvent::RecordingStopped);
 
                                 // Spawn async task for transcribe + cleanup + paste
-                                let cfg = config.clone();
+                                // Always reload from disk so settings changes take effect immediately
+                                let cfg = Config::load();
                                 let tx = event_tx.clone();
                                 let flags = Arc::clone(&flags);
 
