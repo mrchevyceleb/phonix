@@ -47,7 +47,9 @@ async fn call_lm(raw: &str, config: &Config) -> Result<String> {
         "max_tokens": 1024
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
     let mut req = client.post(&url).json(&body);
 
     if !config.cleanup_api_key.is_empty() {
@@ -60,11 +62,16 @@ async fn call_lm(raw: &str, config: &Config) -> Result<String> {
     }
 
     let json: serde_json::Value = resp.json().await?;
-    let text = json["choices"][0]["message"]["content"]
+    let mut text = json["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or(raw)
         .trim()
         .to_string();
+
+    // Strip <think>...</think> blocks from reasoning models (DeepSeek, etc.)
+    if let Some(end) = text.find("</think>") {
+        text = text[end + 8..].trim().to_string();
+    }
 
     Ok(text)
 }

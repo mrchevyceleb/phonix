@@ -55,6 +55,7 @@ fn main() -> eframe::Result<()> {
                 let mut sample_rate = 44100u32;
                 let mut recording = false;
                 let mut target_hwnd: u64 = 0;
+                let mut pre_roll_len: usize = 0;
 
                 // Open the mic once at startup so the pre-roll buffer is
                 // already warm when the user first presses the hotkey.
@@ -72,7 +73,7 @@ fn main() -> eframe::Result<()> {
                             hotkey::HotkeyEvent::RecordStart { target_hwnd: hwnd } if !recording => {
                                 recording = true;
                                 target_hwnd = hwnd;
-                                recorder.start();
+                                pre_roll_len = recorder.start();
                                 let _ = event_tx.send(AppEvent::RecordingStarted);
                             }
                             hotkey::HotkeyEvent::RecordStop if recording => {
@@ -86,10 +87,13 @@ fn main() -> eframe::Result<()> {
                                 let hwnd = target_hwnd;
                                 let tx = event_tx.clone();
                                 let flags = Arc::clone(&flags);
+                                let prl = pre_roll_len;
 
                                 rt.spawn(async move {
-                                    // Guard: ignore clips shorter than 0.5s
-                                    if samples.len() < (sample_rate / 2) as usize {
+                                    // Guard: ignore clips where actual speech is shorter than 0.5s
+                                    // (subtract pre-roll since that's ambient noise, not speech)
+                                    let speech_samples = samples.len().saturating_sub(prl);
+                                    if speech_samples < (sample_rate / 2) as usize {
                                         let _ = tx.send(AppEvent::StatusUpdate(
                                             "Too short — try again".into(),
                                         ));
@@ -208,6 +212,9 @@ fn maybe_start_local_server(
     let _ = event_tx.send(AppEvent::StatusUpdate(
         "Starting local Whisper server…".into(),
     ));
+
+    // Kill any zombie whisper-server processes from previous runs
+    server::WhisperServer::kill_stale();
 
     let mut srv = server::WhisperServer::new();
     if let Err(e) = srv.start(&server_py) {

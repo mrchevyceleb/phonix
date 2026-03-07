@@ -17,6 +17,21 @@ impl WhisperServer {
         Self { child: None }
     }
 
+    /// Kill any leftover whisper-server processes from previous runs.
+    /// Prevents zombie Python processes from piling up if the app crashed.
+    pub fn kill_stale() {
+        #[cfg(windows)]
+        {
+            // Find python processes listening on port 8080
+            let _ = Command::new("cmd")
+                .args(["/C", "for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :8080 ^| findstr LISTENING') do taskkill /F /T /PID %a"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+        }
+    }
+
     /// Spawn the whisper server. Blocks briefly to install deps, then returns.
     /// Server readiness is checked separately via `wait_until_ready`.
     pub fn start(&mut self, server_py: &PathBuf) -> Result<(), String> {
@@ -59,7 +74,7 @@ impl WhisperServer {
     pub fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
         let start = Instant::now();
         loop {
-            if is_port_open(8080) {
+            if is_server_ready() {
                 return Ok(());
             }
             if start.elapsed() > timeout {
@@ -119,12 +134,23 @@ pub fn find_server_py() -> Option<PathBuf> {
     None
 }
 
-fn is_port_open(port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(
-        &format!("127.0.0.1:{port}").parse().unwrap(),
-        Duration::from_millis(200),
-    )
-    .is_ok()
+/// Send a real HTTP GET /health and return true if we get any response back.
+/// Unlike bare TCP polling, this completes the HTTP transaction so single-threaded
+/// Flask doesn't block waiting for a request that never arrives.
+fn is_server_ready() -> bool {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &"127.0.0.1:8080".parse().unwrap(),
+        Duration::from_millis(300),
+    ) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+    let _ = stream.write_all(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
+    let mut buf = [0u8; 32];
+    matches!(stream.read(&mut buf), Ok(n) if n > 0)
 }
 
 /// Find a working Python executable. Tries py -3.13, py -3.12, py, python3, python.

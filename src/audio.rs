@@ -91,16 +91,25 @@ impl AudioRecorder {
     }
 
     /// Begin an active recording. Seeds the buffer with pre-roll so the
-    /// first word is never clipped.
-    pub fn start(&self) {
+    /// first word is never clipped. Returns the number of pre-roll samples
+    /// so the caller can distinguish pre-roll from real speech.
+    pub fn start(&self) -> usize {
+        // Snapshot pre-roll first, then clear recording and seed it.
+        // This lock ordering avoids holding both locks simultaneously,
+        // which would block the audio callback.
+        let pre_roll_data: Vec<f32> = {
+            let pr = self.pre_roll.lock().unwrap();
+            pr.iter().copied().collect()
+        };
+        let pre_roll_len = pre_roll_data.len();
+
         let mut rec = self.recording.lock().unwrap();
         rec.clear();
-        // Seed with pre-roll audio captured before the key was pressed
-        let pr = self.pre_roll.lock().unwrap();
-        rec.extend(pr.iter().copied());
+        rec.extend_from_slice(&pre_roll_data);
         drop(rec);
 
         *self.active.lock().unwrap() = true;
+        pre_roll_len
     }
 
     /// Stop the active recording and return the captured samples.

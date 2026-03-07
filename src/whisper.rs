@@ -25,7 +25,9 @@ pub async fn transcribe(samples: Vec<f32>, sample_rate: u32, config: &Config) ->
         .text("language", "en")
         .text("response_format", "text");
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
     let mut req = client.post(&url).multipart(form);
 
     if !config.whisper_api_key.is_empty() {
