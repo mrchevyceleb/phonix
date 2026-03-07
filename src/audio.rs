@@ -79,7 +79,7 @@ impl AudioRecorder {
         self.stream = None;
         let captured = self.samples.lock().unwrap().clone();
 
-        let pad = (self.sample_rate as f32 * 0.3) as usize;
+        let pad = (self.sample_rate as f32 * 0.5) as usize;
         let mut padded = vec![0.0f32; pad];
         padded.extend_from_slice(&captured);
         padded
