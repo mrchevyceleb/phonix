@@ -43,7 +43,7 @@ fn main() -> eframe::Result<()> {
 
     // ── Pipeline thread ───────────────────────────────────────────────────────
     {
-        let config = config.clone();
+        let _config = config.clone(); // retained for potential future use
         let flags = Arc::clone(&flags);
         let event_tx = event_tx.clone();
 

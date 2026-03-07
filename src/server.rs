@@ -2,6 +2,12 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+// CREATE_NO_WINDOW — prevents Python from opening a console window
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 pub struct WhisperServer {
     child: Option<Child>,
 }
@@ -25,6 +31,10 @@ impl WhisperServer {
             cmd.args(["-m", "pip", "install", "-r"]);
             cmd.arg(&req);
             cmd.arg("--quiet");
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
             let _ = cmd.status(); // best-effort, ignore errors
         }
 
@@ -33,6 +43,8 @@ impl WhisperServer {
         cmd.arg(server_py);
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
 
         let child = cmd
             .spawn()
