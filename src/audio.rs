@@ -72,10 +72,16 @@ impl AudioRecorder {
     }
 
     /// Stop recording and return captured mono samples.
+    /// Prepends 300ms of silence to compensate for stream startup latency —
+    /// without this, the first syllable of speech gets clipped.
     pub fn stop(&mut self) -> Vec<f32> {
         *self.active.lock().unwrap() = false;
-        // Drop the stream to stop the audio device
         self.stream = None;
-        self.samples.lock().unwrap().clone()
+        let captured = self.samples.lock().unwrap().clone();
+
+        let pad = (self.sample_rate as f32 * 0.3) as usize;
+        let mut padded = vec![0.0f32; pad];
+        padded.extend_from_slice(&captured);
+        padded
     }
 }
