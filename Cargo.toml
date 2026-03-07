@@ -1,0 +1,53 @@
+[package]
+name = "phonix"
+version = "0.1.0"
+edition = "2021"
+description = "Local voice dictation — hold a key, speak, text appears anywhere"
+license = "MIT"
+
+[[bin]]
+name = "phonix"
+path = "src/main.rs"
+
+[dependencies]
+# UI
+eframe = { version = "0.28", default-features = true }
+egui = "0.28"
+tray-icon = "0.14"
+
+# Audio
+cpal = "0.15"
+hound = "3.5"
+
+# HTTP (Whisper API + LM Studio)
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+
+# Data
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+directories = "5"
+
+# Clipboard
+arboard = "3"
+
+# Concurrency
+crossbeam-channel = "0.5"
+
+# Error handling
+anyhow = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Foundation",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
