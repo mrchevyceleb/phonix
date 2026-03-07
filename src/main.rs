@@ -54,13 +54,15 @@ fn main() -> eframe::Result<()> {
                 let mut recorder = AudioRecorder::new();
                 let mut sample_rate = 44100u32;
                 let mut recording = false;
+                let mut target_hwnd: u64 = 0;
 
                 loop {
                     // Drain hotkey events
                     while let Ok(ev) = hotkey_rx.try_recv() {
                         match ev {
-                            hotkey::HotkeyEvent::RecordStart if !recording => {
+                            hotkey::HotkeyEvent::RecordStart { target_hwnd: hwnd } if !recording => {
                                 recording = true;
+                                target_hwnd = hwnd;
                                 match recorder.start() {
                                     Ok(sr) => sample_rate = sr,
                                     Err(e) => {
@@ -78,6 +80,7 @@ fn main() -> eframe::Result<()> {
                                 // Spawn async task for transcribe + cleanup + paste
                                 // Always reload from disk so settings changes take effect immediately
                                 let cfg = Config::load();
+                                let hwnd = target_hwnd;
                                 let tx = event_tx.clone();
                                 let flags = Arc::clone(&flags);
 
@@ -127,7 +130,7 @@ fn main() -> eframe::Result<()> {
                                     };
 
                                     if do_paste {
-                                        if let Err(e) = paste::paste(&text) {
+                                        if let Err(e) = paste::paste(&text, hwnd) {
                                             eprintln!("[phonix/paste] {e}");
                                         }
                                     }

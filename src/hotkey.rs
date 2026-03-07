@@ -2,7 +2,9 @@ use crossbeam_channel::Sender;
 
 #[derive(Debug)]
 pub enum HotkeyEvent {
-    RecordStart,
+    /// Key pressed. Carries the HWND of the window that was focused at the
+    /// moment of the keypress — so we can restore focus before pasting.
+    RecordStart { target_hwnd: u64 },
     RecordStop,
 }
 
@@ -28,8 +30,8 @@ fn vk_for_name(name: &str) -> i32 {
     }
 }
 
-/// Spawn a background thread that polls `GetAsyncKeyState` every 20ms and
-/// sends `RecordStart` / `RecordStop` events on state changes.
+/// Spawn a background thread that polls `GetAsyncKeyState` every 20ms.
+/// On key-down, captures the foreground window so paste can restore focus.
 pub fn start_polling(key_name: String, tx: Sender<HotkeyEvent>) {
     std::thread::Builder::new()
         .name("phonix-hotkey".into())
@@ -42,7 +44,8 @@ pub fn start_polling(key_name: String, tx: Sender<HotkeyEvent>) {
 
                 if pressed && !held {
                     held = true;
-                    let _ = tx.send(HotkeyEvent::RecordStart);
+                    let hwnd = get_foreground_window();
+                    let _ = tx.send(HotkeyEvent::RecordStart { target_hwnd: hwnd });
                 } else if !pressed && held {
                     held = false;
                     let _ = tx.send(HotkeyEvent::RecordStop);
@@ -60,7 +63,14 @@ fn is_key_down(vk: i32) -> bool {
     unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
 }
 
-#[cfg(not(windows))]
-fn is_key_down(_vk: i32) -> bool {
-    false // TODO: Linux/macOS support
+#[cfg(windows)]
+fn get_foreground_window() -> u64 {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    unsafe { GetForegroundWindow().0 as u64 }
 }
+
+#[cfg(not(windows))]
+fn is_key_down(_vk: i32) -> bool { false }
+
+#[cfg(not(windows))]
+fn get_foreground_window() -> u64 { 0 }
