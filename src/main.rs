@@ -56,6 +56,15 @@ fn main() -> eframe::Result<()> {
                 let mut recording = false;
                 let mut target_hwnd: u64 = 0;
 
+                // Open the mic once at startup so the pre-roll buffer is
+                // already warm when the user first presses the hotkey.
+                match recorder.open() {
+                    Ok(sr) => sample_rate = sr,
+                    Err(e) => {
+                        let _ = event_tx.send(AppEvent::Error(format!("Mic error: {e}")));
+                    }
+                }
+
                 loop {
                     // Drain hotkey events
                     while let Ok(ev) = hotkey_rx.try_recv() {
@@ -63,13 +72,7 @@ fn main() -> eframe::Result<()> {
                             hotkey::HotkeyEvent::RecordStart { target_hwnd: hwnd } if !recording => {
                                 recording = true;
                                 target_hwnd = hwnd;
-                                match recorder.start() {
-                                    Ok(sr) => sample_rate = sr,
-                                    Err(e) => {
-                                        let _ = event_tx.send(AppEvent::Error(e.to_string()));
-                                        recording = false;
-                                    }
-                                }
+                                recorder.start();
                                 let _ = event_tx.send(AppEvent::RecordingStarted);
                             }
                             hotkey::HotkeyEvent::RecordStop if recording => {

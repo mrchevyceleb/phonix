@@ -1,33 +1,43 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+
+/// How many seconds of audio to keep in the pre-roll buffer.
+/// When the hotkey fires, we include this pre-roll so the first
+/// syllable is never clipped even if the user starts speaking
+/// the instant they press the key.
+const PRE_ROLL_SECS: f32 = 0.8;
 
 pub struct AudioRecorder {
     stream: Option<Stream>,
-    samples: Arc<Mutex<Vec<f32>>>,
+    /// Rolling ring buffer — always capturing, capped at PRE_ROLL_SECS
+    pre_roll: Arc<Mutex<VecDeque<f32>>>,
+    /// Active recording buffer — filled from the moment RecordStart fires
+    recording: Arc<Mutex<Vec<f32>>>,
     active: Arc<Mutex<bool>>,
     pub sample_rate: u32,
-    pub channels: usize,
+    channels: usize,
 }
 
-// SAFETY: cpal::Stream is not Send on all platforms, but we only access it
-// from the single pipeline thread that owns AudioRecorder.
 unsafe impl Send for AudioRecorder {}
 
 impl AudioRecorder {
     pub fn new() -> Self {
         Self {
             stream: None,
-            samples: Arc::new(Mutex::new(Vec::new())),
+            pre_roll: Arc::new(Mutex::new(VecDeque::new())),
+            recording: Arc::new(Mutex::new(Vec::new())),
             active: Arc::new(Mutex::new(false)),
             sample_rate: 44100,
             channels: 1,
         }
     }
 
-    /// Start recording. Returns the actual sample rate.
-    pub fn start(&mut self) -> Result<u32> {
+    /// Open the mic and start the always-on pre-roll buffer.
+    /// Call this once at app startup, not on every keypress.
+    pub fn open(&mut self) -> Result<u32> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -37,28 +47,37 @@ impl AudioRecorder {
         self.sample_rate = supported.sample_rate().0;
         self.channels = supported.channels() as usize;
 
-        let samples = Arc::clone(&self.samples);
+        let pre_roll = Arc::clone(&self.pre_roll);
+        let recording = Arc::clone(&self.recording);
         let active = Arc::clone(&self.active);
         let channels = self.channels;
-
-        {
-            let mut s = samples.lock().unwrap();
-            s.clear();
-        }
-        *active.lock().unwrap() = true;
+        let sample_rate = self.sample_rate;
+        let pre_roll_cap = (sample_rate as f32 * PRE_ROLL_SECS) as usize;
 
         let stream = device.build_input_stream(
             &supported.into(),
             move |data: &[f32], _| {
-                if *active.lock().unwrap() {
-                    let mut buf = samples.lock().unwrap();
-                    if channels > 1 {
-                        // Downmix to mono
-                        for chunk in data.chunks(channels) {
-                            buf.push(chunk.iter().sum::<f32>() / channels as f32);
-                        }
-                    } else {
-                        buf.extend_from_slice(data);
+                // Downmix to mono
+                let mono: Vec<f32> = if channels > 1 {
+                    data.chunks(channels)
+                        .map(|c| c.iter().sum::<f32>() / channels as f32)
+                        .collect()
+                } else {
+                    data.to_vec()
+                };
+
+                let is_active = *active.lock().unwrap();
+
+                if is_active {
+                    // Append to active recording buffer
+                    recording.lock().unwrap().extend_from_slice(&mono);
+                } else {
+                    // Maintain rolling pre-roll ring buffer
+                    let mut pr = pre_roll.lock().unwrap();
+                    pr.extend(mono.iter().copied());
+                    // Trim to cap
+                    while pr.len() > pre_roll_cap {
+                        pr.pop_front();
                     }
                 }
             },
@@ -71,17 +90,22 @@ impl AudioRecorder {
         Ok(self.sample_rate)
     }
 
-    /// Stop recording and return captured mono samples.
-    /// Prepends 300ms of silence to compensate for stream startup latency —
-    /// without this, the first syllable of speech gets clipped.
-    pub fn stop(&mut self) -> Vec<f32> {
-        *self.active.lock().unwrap() = false;
-        self.stream = None;
-        let captured = self.samples.lock().unwrap().clone();
+    /// Begin an active recording. Seeds the buffer with pre-roll so the
+    /// first word is never clipped.
+    pub fn start(&self) {
+        let mut rec = self.recording.lock().unwrap();
+        rec.clear();
+        // Seed with pre-roll audio captured before the key was pressed
+        let pr = self.pre_roll.lock().unwrap();
+        rec.extend(pr.iter().copied());
+        drop(rec);
 
-        let pad = (self.sample_rate as f32 * 0.5) as usize;
-        let mut padded = vec![0.0f32; pad];
-        padded.extend_from_slice(&captured);
-        padded
+        *self.active.lock().unwrap() = true;
+    }
+
+    /// Stop the active recording and return the captured samples.
+    pub fn stop(&self) -> Vec<f32> {
+        *self.active.lock().unwrap() = false;
+        self.recording.lock().unwrap().clone()
     }
 }
