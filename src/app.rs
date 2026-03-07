@@ -357,35 +357,84 @@ impl PhonixApp {
 
             ui.add_space(12.0);
             ui.heading("Whisper  (speech → text)");
-            ui.label(
-                RichText::new(
-                    "Works with Groq, OpenAI, or a local whisper.cpp server.\n\
-                     Point at http://localhost:8080 for whisper.cpp --server",
-                )
-                .small()
-                .color(Color32::GRAY),
-            );
             ui.add_space(4.0);
-            egui::Grid::new("g_wh")
+
+            // Provider picker
+            egui::Grid::new("g_wh_provider")
                 .num_columns(2)
                 .spacing([12.0, 8.0])
                 .show(ui, |ui| {
-                    ui.label("API URL");
-                    ui.text_edit_singleline(&mut self.config.whisper_url);
+                    use crate::config::WhisperProvider;
+
+                    ui.label("Provider");
+                    ui.horizontal(|ui| {
+                        for provider in [WhisperProvider::Groq, WhisperProvider::OpenAI, WhisperProvider::Local] {
+                            let selected = self.config.whisper_provider == provider;
+                            let label = provider.label();
+                            if ui.selectable_label(selected, label).clicked() {
+                                self.config.whisper_provider = provider;
+                                // Clear overrides so defaults kick in
+                                self.config.whisper_url_override.clear();
+                                self.config.whisper_model_override.clear();
+                            }
+                        }
+                    });
                     ui.end_row();
 
-                    ui.label("API Key");
-                    ui.add(
-                        TextEdit::singleline(&mut self.config.whisper_api_key)
-                            .password(true)
-                            .hint_text("leave blank for no auth"),
+                    // API key (hidden for local)
+                    if self.config.whisper_provider.needs_key() {
+                        ui.label("API Key");
+                        ui.add(
+                            TextEdit::singleline(&mut self.config.whisper_api_key)
+                                .password(true)
+                                .hint_text("paste your API key here"),
+                        );
+                        ui.end_row();
+                    }
+
+                    // Show resolved URL + model as read-only hints
+                    ui.label("Endpoint");
+                    ui.label(
+                        RichText::new(self.config.whisper_url())
+                            .small()
+                            .color(Color32::GRAY),
                     );
                     ui.end_row();
 
                     ui.label("Model");
-                    ui.text_edit_singleline(&mut self.config.whisper_model);
+                    ui.label(
+                        RichText::new(self.config.whisper_model())
+                            .small()
+                            .color(Color32::GRAY),
+                    );
                     ui.end_row();
                 });
+
+            // Advanced overrides (collapsed by default)
+            egui::CollapsingHeader::new(
+                RichText::new("Advanced — override URL / model").small(),
+            )
+            .default_open(false)
+            .show(ui, |ui| {
+                egui::Grid::new("g_wh_adv")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("URL override");
+                        ui.add(
+                            TextEdit::singleline(&mut self.config.whisper_url_override)
+                                .hint_text("leave blank to use provider default"),
+                        );
+                        ui.end_row();
+
+                        ui.label("Model override");
+                        ui.add(
+                            TextEdit::singleline(&mut self.config.whisper_model_override)
+                                .hint_text("leave blank to use provider default"),
+                        );
+                        ui.end_row();
+                    });
+            });
 
             ui.add_space(12.0);
             ui.heading("Cleanup  (text → polished text)");

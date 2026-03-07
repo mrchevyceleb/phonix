@@ -3,21 +3,69 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum WhisperProvider {
+    Groq,
+    OpenAI,
+    /// Local whisper.cpp server (default: http://localhost:8080)
+    Local,
+}
+
+impl Default for WhisperProvider {
+    fn default() -> Self {
+        Self::Groq
+    }
+}
+
+impl WhisperProvider {
+    pub fn url(&self) -> &str {
+        match self {
+            Self::Groq => "https://api.groq.com/openai/v1",
+            Self::OpenAI => "https://api.openai.com/v1",
+            Self::Local => "http://localhost:8080",
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Groq => "whisper-large-v3",
+            Self::OpenAI => "whisper-1",
+            Self::Local => "whisper-1", // whisper.cpp server uses this name
+        }
+    }
+
+    pub fn needs_key(&self) -> bool {
+        !matches!(self, Self::Local)
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Groq => "Groq (free, fast)",
+            Self::OpenAI => "OpenAI",
+            Self::Local => "Local (whisper.cpp server)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Virtual key name for push-to-talk. Default: "RightAlt"
-    /// Options: "RightAlt", "RightControl", "F13", "CapsLock", "ScrollLock"
+    /// Virtual key name for push-to-talk.
+    /// Options: "RightAlt", "RightControl", "LeftAlt", "LeftControl",
+    ///          "CapsLock", "ScrollLock", "F13"–"F16"
     pub record_key: String,
 
     /// Automatically paste into the active window after transcription
     pub auto_paste: bool,
 
-    /// Whisper-compatible endpoint (OpenAI, Groq, local whisper.cpp server, etc.)
-    pub whisper_url: String,
+    // ── Whisper (speech → text) ───────────────────────────────────────────────
+    pub whisper_provider: WhisperProvider,
+    /// Override URL — leave blank to use the provider default
+    pub whisper_url_override: String,
     pub whisper_api_key: String,
-    pub whisper_model: String,
+    /// Override model — leave blank to use the provider default
+    pub whisper_model_override: String,
 
-    /// LM Studio (or any OpenAI-compatible) endpoint for cleanup
+    // ── Cleanup LLM (text → polished text) ───────────────────────────────────
     pub cleanup_enabled: bool,
     pub cleanup_url: String,
     pub cleanup_api_key: String,
@@ -30,21 +78,38 @@ impl Default for Config {
             record_key: "RightAlt".to_string(),
             auto_paste: true,
 
-            // Default to Groq (free, near-instant). Swap for local whisper.cpp server.
-            whisper_url: "https://api.groq.com/openai/v1".to_string(),
+            whisper_provider: WhisperProvider::Groq,
+            whisper_url_override: String::new(),
             whisper_api_key: String::new(),
-            whisper_model: "whisper-large-v3".to_string(),
+            whisper_model_override: String::new(),
 
             cleanup_enabled: true,
             cleanup_url: "http://localhost:1234/v1".to_string(),
             cleanup_api_key: "lm-studio".to_string(),
-            // Set this to whatever model name LM Studio shows at the top of its UI
             cleanup_model: "local-model".to_string(),
         }
     }
 }
 
 impl Config {
+    /// Resolved Whisper API URL (override wins if set)
+    pub fn whisper_url(&self) -> &str {
+        if !self.whisper_url_override.is_empty() {
+            &self.whisper_url_override
+        } else {
+            self.whisper_provider.url()
+        }
+    }
+
+    /// Resolved Whisper model (override wins if set)
+    pub fn whisper_model(&self) -> &str {
+        if !self.whisper_model_override.is_empty() {
+            &self.whisper_model_override
+        } else {
+            self.whisper_provider.model()
+        }
+    }
+
     fn path() -> Option<PathBuf> {
         ProjectDirs::from("io", "phonix", "Phonix")
             .map(|d| d.config_dir().join("config.toml"))

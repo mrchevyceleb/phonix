@@ -13,7 +13,7 @@ pub async fn transcribe(samples: Vec<f32>, sample_rate: u32, config: &Config) ->
     }
 
     let wav = encode_wav(samples, sample_rate)?;
-    let url = format!("{}/audio/transcriptions", config.whisper_url.trim_end_matches('/'));
+    let url = format!("{}/audio/transcriptions", config.whisper_url().trim_end_matches('/'));
 
     let file_part = multipart::Part::bytes(wav)
         .file_name("audio.wav")
@@ -21,7 +21,7 @@ pub async fn transcribe(samples: Vec<f32>, sample_rate: u32, config: &Config) ->
 
     let form = multipart::Form::new()
         .part("file", file_part)
-        .text("model", config.whisper_model.clone())
+        .text("model", config.whisper_model().to_string())
         .text("language", "en")
         .text("response_format", "text");
 
