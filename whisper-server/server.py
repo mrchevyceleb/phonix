@@ -2,125 +2,112 @@
 Phonix local Whisper server
 Wraps faster-whisper in an OpenAI-compatible /v1/audio/transcriptions endpoint.
 
-Usage:
-    py -3.13 server.py
+Requirements:
+    pip install faster-whisper flask
 
-Then set Phonix → Settings → Provider → Local
+Usage:
+    py -3.13 server.py          # GPU (CUDA)
+    py server.py --cpu          # CPU only
+    py server.py --model small  # different model size
 """
 
 import os
 import sys
+import argparse
 import tempfile
 
-# Register CUDA 12.6 DLLs before importing faster-whisper
-cuda_path = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin"
-if os.path.exists(cuda_path):
-    os.add_dll_directory(cuda_path)
+# ── CUDA setup ────────────────────────────────────────────────────────────────
+# ctranslate2 needs CUDA 12.x DLLs on PATH. We check common install locations
+# and register whichever we find. Safe to skip if not on Windows or no CUDA.
+
+def _register_cuda():
+    if sys.platform != "win32":
+        return
+    cuda_candidates = [
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin",
+    ]
+    for path in cuda_candidates:
+        if os.path.exists(path):
+            os.add_dll_directory(path)
+            print(f"[whisper-server] CUDA DLLs: {path}")
+            return
+    print("[whisper-server] No CUDA 12.x found — falling back to CPU")
+
+_register_cuda()
+
+# ── Imports (after CUDA registration) ────────────────────────────────────────
 
 from faster_whisper import WhisperModel
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import cgi
-import json
+from flask import Flask, request, Response
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Args ──────────────────────────────────────────────────────────────────────
 
-MODEL_SIZE = "medium"   # tiny / base / small / medium / large-v3
-DEVICE     = "cuda"     # cuda or cpu
-COMPUTE    = "float16"  # float16 (GPU) or int8 (CPU)
-HOST       = "0.0.0.0"
-PORT       = 8080
+parser = argparse.ArgumentParser(description="Phonix local Whisper server")
+parser.add_argument("--model",  default="medium",
+                    choices=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
+                    help="Whisper model size (default: medium)")
+parser.add_argument("--cpu",    action="store_true",
+                    help="Force CPU inference (default: auto-detect GPU)")
+parser.add_argument("--port",   type=int, default=8080,
+                    help="Port to listen on (default: 8080)")
+args = parser.parse_args()
 
-# ── Load model once at startup ────────────────────────────────────────────────
+device  = "cpu" if args.cpu else "cuda"
+compute = "int8" if args.cpu else "float16"
 
-print(f"[whisper-server] Loading {MODEL_SIZE} on {DEVICE}...")
-model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE)
-print(f"[whisper-server] Ready on http://localhost:{PORT}")
+# ── Load model ────────────────────────────────────────────────────────────────
 
-# ── HTTP handler ──────────────────────────────────────────────────────────────
+print(f"[whisper-server] Loading {args.model} on {device}...")
+try:
+    model = WhisperModel(args.model, device=device, compute_type=compute)
+except Exception as e:
+    print(f"[whisper-server] GPU load failed ({e}), retrying on CPU...")
+    model = WhisperModel(args.model, device="cpu", compute_type="int8")
 
-class Handler(BaseHTTPRequestHandler):
+print(f"[whisper-server] Ready — http://localhost:{args.port}")
 
-    def log_message(self, fmt, *args):
-        print(f"[whisper-server] {fmt % args}")
+# ── Flask app ─────────────────────────────────────────────────────────────────
 
-    def do_POST(self):
-        if self.path not in ("/v1/audio/transcriptions", "/audio/transcriptions"):
-            self.send_error(404)
-            return
+app = Flask(__name__)
 
-        # Parse multipart form data
-        content_type = self.headers.get("Content-Type", "")
-        if "multipart/form-data" not in content_type:
-            self.send_error(400, "Expected multipart/form-data")
-            return
+@app.route("/health")
+def health():
+    return "ok"
 
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
+@app.route("/v1/audio/transcriptions", methods=["POST"])
+@app.route("/audio/transcriptions", methods=["POST"])
+def transcribe():
+    if "file" not in request.files:
+        return {"error": "missing 'file' field"}, 400
 
-        # Write body to a temp file so cgi can parse it
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp:
-            tmp.write(body)
-            tmp_path = tmp.name
+    audio = request.files["file"]
 
-        try:
-            # Re-parse multipart from the temp file
-            import email
-            raw = (
-                f"Content-Type: {content_type}\r\n"
-                f"Content-Length: {length}\r\n\r\n"
-            ).encode() + body
+    # Save to a temp file — faster-whisper needs a path, not a stream
+    suffix = os.path.splitext(audio.filename or ".wav")[1] or ".wav"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        audio.save(tmp.name)
+        tmp_path = tmp.name
 
-            msg = email.message_from_bytes(raw)
-            audio_data = None
-            for part in msg.walk():
-                cd = part.get("Content-Disposition", "")
-                if 'name="file"' in cd:
-                    audio_data = part.get_payload(decode=True)
-                    break
+    try:
+        segments, _ = model.transcribe(
+            tmp_path,
+            language="en",
+            beam_size=5,
+            vad_filter=True,
+        )
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+    finally:
+        os.unlink(tmp_path)
 
-            if audio_data is None:
-                self.send_error(400, "No file field in form data")
-                return
-
-            # Write audio to temp WAV
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as af:
-                af.write(audio_data)
-                audio_path = af.name
-
-            try:
-                segments, _ = model.transcribe(
-                    audio_path,
-                    language="en",
-                    beam_size=5,
-                    vad_filter=True,
-                )
-                text = " ".join(seg.text.strip() for seg in segments).strip()
-            finally:
-                os.unlink(audio_path)
-
-        finally:
-            os.unlink(tmp_path)
-
-        # Phonix sends response_format=text, return plain text
-        response = text.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(response)))
-        self.end_headers()
-        self.wfile.write(response)
-
-    def do_GET(self):
-        if self.path == "/health":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
-        else:
-            self.send_error(404)
+    # Phonix sends response_format=text — return plain text
+    return Response(text, mimetype="text/plain")
 
 
 if __name__ == "__main__":
-    server = HTTPServer((HOST, PORT), Handler)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n[whisper-server] Stopped.")
+    app.run(host="0.0.0.0", port=args.port, debug=False)
