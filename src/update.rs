@@ -36,14 +36,18 @@ async fn check_inner(event_tx: &Sender<AppEvent>) -> Result<(), Box<dyn std::err
 
     let tag = resp["tag_name"].as_str().unwrap_or_default();
     let remote_version = tag.strip_prefix('v').unwrap_or(tag);
+
+    // Skip pre-release tags (e.g. "1.0.1-beta")
+    if remote_version.contains('-') {
+        return Ok(());
+    }
+
     let url = resp["html_url"].as_str().unwrap_or_default();
-    let notes = resp["body"].as_str().unwrap_or_default();
 
     if is_newer(remote_version, CURRENT_VERSION) {
         let _ = event_tx.try_send(AppEvent::UpdateAvailable {
             version: remote_version.to_string(),
             url: url.to_string(),
-            notes: notes.to_string(),
         });
     }
 
@@ -57,7 +61,6 @@ fn is_newer(remote: &str, local: &str) -> bool {
         let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
         let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
         let patch = parts.next().and_then(|p| {
-            // Strip anything after a hyphen (e.g. "1-beta")
             p.split('-').next().and_then(|n| n.parse().ok())
         }).unwrap_or(0);
         (major, minor, patch)
@@ -67,6 +70,9 @@ fn is_newer(remote: &str, local: &str) -> bool {
 
 /// Open a URL in the default browser (Windows).
 pub fn open_in_browser(url: &str) {
+    if !url.starts_with("https://") {
+        return;
+    }
     let _ = std::process::Command::new("cmd")
         .args(["/C", "start", "", url])
         .spawn();

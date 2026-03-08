@@ -37,7 +37,7 @@ pub enum AppEvent {
     Transcribed { text: String, raw: String, for_long_dictate: bool },
     StatusUpdate(String),
     Error(String),
-    UpdateAvailable { version: String, url: String, notes: String },
+    UpdateAvailable { version: String, url: String },
 }
 
 // ── Commands flowing FROM UI TO pipeline ─────────────────────────────────────
@@ -89,8 +89,8 @@ pub struct PhonixApp {
     // Request focus on the Long Dictate text area after clicking Start
     focus_long_dictate_text: bool,
 
-    // Update notification from GitHub releases
-    update_info: Option<(String, String, String)>,
+    // Update notification from GitHub releases: (version, url)
+    update_info: Option<(String, String)>,
     update_dismissed: bool,
 
     // True when user explicitly clicked Quit in tray menu; bypasses close-to-tray
@@ -285,8 +285,8 @@ impl eframe::App for PhonixApp {
                     }
                     self.status = format!("Error: {e}");
                 }
-                AppEvent::UpdateAvailable { version, url, notes } => {
-                    self.update_info = Some((version, url, notes));
+                AppEvent::UpdateAvailable { version, url } => {
+                    self.update_info = Some((version, url));
                 }
             }
         }
@@ -372,7 +372,7 @@ impl PhonixApp {
             return;
         }
         let (version, url) = match &self.update_info {
-            Some((v, u, _)) => (v.clone(), u.clone()),
+            Some((v, u)) => (v.clone(), u.clone()),
             None => return,
         };
 
