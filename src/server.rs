@@ -65,7 +65,7 @@ impl WhisperServer {
         cmd.args(&pre_args);
         cmd.arg(server_py);
         cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
+        cmd.stderr(Stdio::piped());
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
 
@@ -77,16 +77,42 @@ impl WhisperServer {
         Ok(())
     }
 
+    /// Check if the server process exited early. Returns the stderr output if it did.
+    pub fn check_early_exit(&mut self) -> Option<String> {
+        let child = self.child.as_mut()?;
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stderr_output = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = stderr.read_to_string(&mut stderr_output);
+                }
+                if stderr_output.is_empty() {
+                    Some(format!("Server exited with {status}"))
+                } else {
+                    stderr_output.truncate(300);
+                    Some(format!("Server crashed: {stderr_output}"))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Poll localhost:8080 until the server accepts connections.
     /// Returns Ok after the server is up, Err if it times out.
-    pub fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
+    pub fn wait_until_ready(&mut self, timeout: Duration) -> Result<(), String> {
         let start = Instant::now();
         loop {
+            if let Some(err) = self.check_early_exit() {
+                return Err(err);
+            }
             if is_server_ready() {
                 return Ok(());
             }
             if start.elapsed() > timeout {
-                return Err("Whisper server did not start within 60s".to_string());
+                return Err(
+                    "Whisper server did not start within 60s. Check that Python 3 and its dependencies (flask, faster-whisper) are installed.".to_string()
+                );
             }
             std::thread::sleep(Duration::from_millis(400));
         }
@@ -151,6 +177,11 @@ pub fn find_server_py() -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Public wrapper for use by the health-poll thread in main.rs.
+pub fn is_server_ready_public() -> bool {
+    is_server_ready()
 }
 
 /// Send a real HTTP GET /health and return true if we get any response back.

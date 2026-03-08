@@ -256,7 +256,7 @@ fn main() -> eframe::Result<()> {
 fn maybe_start_local_server(
     config: &Config,
     event_tx: &crossbeam_channel::Sender<AppEvent>,
-) -> Option<server::WhisperServer> {
+) -> Option<Arc<Mutex<server::WhisperServer>>> {
     use config::WhisperProvider;
 
     if config.whisper_provider != WhisperProvider::Local {
@@ -286,17 +286,34 @@ fn maybe_start_local_server(
         return None;
     }
 
+    // Wrap server in Arc<Mutex> so the health-poll thread can check for early exit
+    let srv = Arc::new(Mutex::new(srv));
+
     // Health-poll in background — updates status when ready
     let tx = event_tx.clone();
-    let srv_ref = server::WhisperServer::new(); // dummy ref just for the wait helper
+    let srv_poll = Arc::clone(&srv);
     std::thread::spawn(move || {
-        match srv_ref.wait_until_ready(std::time::Duration::from_secs(60)) {
-            Ok(_) => {
-                let _ = tx.try_send(AppEvent::StatusUpdate("Ready — hold key to dictate".into()));
+        let timeout = std::time::Duration::from_secs(60);
+        let start = std::time::Instant::now();
+        loop {
+            // Check if the server process crashed
+            if let Ok(mut s) = srv_poll.lock() {
+                if let Some(err) = s.check_early_exit() {
+                    let _ = tx.try_send(AppEvent::Error(err));
+                    return;
+                }
             }
-            Err(e) => {
-                let _ = tx.try_send(AppEvent::Error(e));
+            if server::is_server_ready_public() {
+                let _ = tx.try_send(AppEvent::StatusUpdate("Ready \u{2014} hold key to dictate".into()));
+                return;
             }
+            if start.elapsed() > timeout {
+                let _ = tx.try_send(AppEvent::Error(
+                    "Whisper server did not start within 60s. Check that Python 3 and its dependencies (flask, faster-whisper) are installed.".into(),
+                ));
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(400));
         }
     });
 
