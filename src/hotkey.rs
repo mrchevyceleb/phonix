@@ -144,8 +144,11 @@ fn get_foreground_window() -> u64 {
 
 #[cfg(target_os = "macos")]
 fn is_key_down(vk: i32) -> bool {
-    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-    CGEventSource::key_state(CGEventSourceStateID::HIDSystemState, vk as u16)
+    // CGEventSourceKeyState with HIDSystemState (1) polls physical key state
+    extern "C" {
+        fn CGEventSourceKeyState(state_id: u32, key: u16) -> bool;
+    }
+    unsafe { CGEventSourceKeyState(1, vk as u16) }
 }
 
 #[cfg(target_os = "macos")]

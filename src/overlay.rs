@@ -337,11 +337,6 @@ mod mac {
     pub const STATE_TRANSCRIBING: u8 = 2;
     pub const STATE_CLEANING: u8 = 3;
 
-    /// Wrapper to send raw ObjC pointers across threads.
-    #[derive(Clone, Copy)]
-    struct SendId(id);
-    unsafe impl Send for SendId {}
-
     pub struct Overlay {
         state: Arc<AtomicU8>,
     }
@@ -377,8 +372,10 @@ mod mac {
 
             // Create window on the main thread (we are on it right now).
             let (window, view) = unsafe { create_overlay_window() };
-            let w = SendId(window);
-            let v = SendId(view);
+            // Cast to usize so they're Send-safe across threads.
+            // The pointers are only dereferenced back on the main thread via GCD.
+            let w_ptr = window as usize;
+            let v_ptr = view as usize;
 
             // Background thread polls the atomic state and dispatches
             // AppKit show/hide/update calls to the main thread via GCD.
@@ -397,15 +394,17 @@ mod mac {
 
                             unsafe {
                                 dispatch_on_main(move || {
+                                    let w = w_ptr as id;
+                                    let v = v_ptr as id;
                                     let _pool = NSAutoreleasePool::new(nil);
                                     if visible && !was_visible {
-                                        update_pill_view(v.0, state_val);
-                                        let _: () = msg_send![w.0, orderFrontRegardless];
+                                        update_pill_view(v, state_val);
+                                        let _: () = msg_send![w, orderFrontRegardless];
                                     } else if !visible && was_visible {
-                                        let _: () = msg_send![w.0, orderOut: nil];
+                                        let _: () = msg_send![w, orderOut: nil];
                                     } else if visible {
-                                        update_pill_view(v.0, state_val);
-                                        let _: () = msg_send![v.0, setNeedsDisplay: YES];
+                                        update_pill_view(v, state_val);
+                                        let _: () = msg_send![v, setNeedsDisplay: YES];
                                     }
                                 });
                             }
