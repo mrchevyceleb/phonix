@@ -42,7 +42,7 @@ impl CleanupProvider {
 
     pub fn model(&self) -> &str {
         match self {
-            Self::Groq => "llama-3.3-70b-versatile",
+            Self::Groq => "llama-3.1-8b-instant",
             Self::OpenAI => "gpt-4o-mini",
             Self::Local => "local-model",
         }
@@ -50,7 +50,7 @@ impl CleanupProvider {
 
     pub fn label(&self) -> &str {
         match self {
-            Self::Groq => "Groq (free)",
+            Self::Groq => "Groq (free, fast)",
             Self::OpenAI => "OpenAI (gpt-4o-mini)",
             Self::Local => "Local (LM Studio)",
         }

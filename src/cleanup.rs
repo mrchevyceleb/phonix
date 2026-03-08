@@ -4,19 +4,10 @@ use serde_json::json;
 use crate::config::Config;
 
 const SYSTEM_PROMPT: &str = "\
-You are a voice dictation cleanup assistant. \
-Transform the raw speech transcription into clean, properly formatted text ready to be pasted.
-
-Rules:
-- Remove filler words: um, uh, like (when used as filler), you know, sort of, kind of, basically
-- When the speaker corrects themselves (e.g. \"Tuesday, actually Wednesday\"), keep only the final intended version
-- Remove accidental word repetitions (e.g. \"the the\", \"I I think\")
-- Handle false starts: \"We should probably, I mean, we need to revise\" → \"We need to revise\"
-- Break run-on speech into proper sentences with punctuation and capitalization
-- Fix obvious transcription errors
-- Preserve the speaker's natural voice — do not rephrase, summarize, or add anything not said
-- If the input is a question, keep it a question
-- Output ONLY the cleaned text. No explanation, no quotes, no preamble, no reasoning, no <think> tags.";
+Clean up this voice dictation. Remove filler words (um, uh, like, you know), \
+fix repetitions, keep only the final version when the speaker corrects themselves, \
+add proper punctuation and capitalization. Preserve the speaker's voice. \
+Output ONLY the cleaned text, nothing else.";
 
 /// Send raw Whisper output to the LLM for Wispr-style cleanup.
 /// On failure, returns the raw text unmodified — never blocks the pipeline.
@@ -44,7 +35,7 @@ async fn call_lm(raw: &str, config: &Config) -> Result<String> {
             { "role": "user",   "content": raw }
         ],
         "temperature": 0.1,
-        "max_tokens": 1024
+        "max_tokens": 512
     });
 
     let client = reqwest::Client::builder()
