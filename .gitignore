@@ -1,1 +1,4 @@
 /target/
+.ripley/
+agents.md
+ripley.md

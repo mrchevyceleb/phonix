@@ -270,45 +270,89 @@ fn build_tray() -> Option<tray_icon::TrayIcon> {
         .ok()
 }
 
-/// Generate a simple 32x32 RGBA colored dot as the tray icon.
-pub fn make_tray_icon_rgb(r: u8, g: u8, b: u8) -> tray_icon::Icon {
-    let size = 32u32;
+/// Generate RGBA pixel data for a microphone-in-circle icon.
+fn generate_mic_icon(bg_r: u8, bg_g: u8, bg_b: u8, size: u32) -> Vec<u8> {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
+    let s = size as f32 / 32.0;
+    let center = size as f32 / 2.0;
+    let circle_r = 13.0 * s;
+
     for y in 0..size {
         for x in 0..size {
-            let cx = x as f32 - size as f32 / 2.0;
-            let cy = y as f32 - size as f32 / 2.0;
-            let dist = (cx * cx + cy * cy).sqrt();
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let dx = px - center;
+            let dy = py - center;
+            let dist = (dx * dx + dy * dy).sqrt();
             let i = ((y * size + x) * 4) as usize;
-            if dist < 13.0 {
-                rgba[i] = r;
-                rgba[i + 1] = g;
-                rgba[i + 2] = b;
-                rgba[i + 3] = 255;
+
+            // Anti-aliased circle edge
+            let alpha = ((circle_r - dist + 0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            if alpha == 0 {
+                continue;
+            }
+
+            // Normalise to 32px base coordinates, relative to center
+            let nx = dx / s;
+            let ny = dy / s;
+
+            // --- Mic head (capsule) ---
+            let head_cy: f32 = -2.5;
+            let head_hw: f32 = 2.5;
+            let head_hh: f32 = 4.0;
+            let in_head = {
+                let rx = nx.abs();
+                let ry = (ny - head_cy).abs();
+                if ry <= head_hh - head_hw {
+                    rx <= head_hw
+                } else {
+                    let oy = ry - (head_hh - head_hw);
+                    rx * rx + oy * oy <= head_hw * head_hw
+                }
+            };
+
+            // --- U-shaped arc around mic ---
+            let arc_cy: f32 = -0.5;
+            let arc_r: f32 = 4.2;
+            let arc_thick: f32 = 1.4;
+            let arc_dist = (nx * nx + (ny - arc_cy).powi(2)).sqrt();
+            let in_arc = (arc_dist - arc_r).abs() <= arc_thick / 2.0 && ny >= arc_cy;
+
+            // --- Stem ---
+            let stem_top = arc_cy + arc_r;
+            let stem_bottom = stem_top + 2.5;
+            let in_stem = nx.abs() <= 0.7 && ny >= stem_top && ny <= stem_bottom;
+
+            // --- Base ---
+            let in_base = nx.abs() <= 2.8 && (ny - stem_bottom).abs() <= 0.7;
+
+            if in_head || in_arc || in_stem || in_base {
+                rgba[i] = 255;
+                rgba[i + 1] = 255;
+                rgba[i + 2] = 255;
+                rgba[i + 3] = alpha;
+            } else {
+                rgba[i] = bg_r;
+                rgba[i + 1] = bg_g;
+                rgba[i + 2] = bg_b;
+                rgba[i + 3] = alpha;
             }
         }
     }
+    rgba
+}
+
+/// Tray icon: microphone in a colored circle.
+pub fn make_tray_icon_rgb(r: u8, g: u8, b: u8) -> tray_icon::Icon {
+    let size = 32u32;
+    let rgba = generate_mic_icon(r, g, b, size);
     tray_icon::Icon::from_rgba(rgba, size, size).expect("tray icon")
 }
 
-/// Same icon data used for the app window title bar.
+/// Window icon: microphone in a blue circle.
 fn load_icon() -> egui::IconData {
-    let size = 32u32;
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
-    for y in 0..size {
-        for x in 0..size {
-            let cx = x as f32 - size as f32 / 2.0;
-            let cy = y as f32 - size as f32 / 2.0;
-            let dist = (cx * cx + cy * cy).sqrt();
-            let i = ((y * size + x) * 4) as usize;
-            if dist < 13.0 {
-                rgba[i] = 100;
-                rgba[i + 1] = 180;
-                rgba[i + 2] = 255;
-                rgba[i + 3] = 255;
-            }
-        }
-    }
+    let size = 64u32;
+    let rgba = generate_mic_icon(100, 180, 255, size);
     egui::IconData {
         rgba,
         width: size,
