@@ -55,6 +55,13 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    // ── Recording overlay (native always-on-top window) ─────────────────────
+    // Created before the pipeline so both the pipeline thread and the UI can
+    // set overlay state. The overlay polls an AtomicU8 so set_state is safe
+    // from any thread.
+    let rec_overlay = overlay::Overlay::new();
+    let shared_overlay: Arc<Option<overlay::Overlay>> = Arc::new(rec_overlay);
+
     // ── Hotkey polling thread ─────────────────────────────────────────────────
     hotkey::start_polling(config.record_key.clone(), hotkey_tx);
 
@@ -64,6 +71,8 @@ fn main() -> eframe::Result<()> {
         let flags = Arc::clone(&flags);
         let event_tx = event_tx.clone();
         let cmd_rx = cmd_rx;
+        let pipeline_overlay = Arc::clone(&shared_overlay);
+        let sound_enabled = config.sound_enabled;
 
         std::thread::Builder::new()
             .name("phonix-pipeline".into())
@@ -75,6 +84,13 @@ fn main() -> eframe::Result<()> {
                 let mut target_hwnd: u64 = 0;
                 let mut pre_roll_len: usize = 0;
                 let mut long_dictate_at_start = false;
+
+                // Helper: set overlay state from the pipeline thread
+                let set_overlay = |state: u8| {
+                    if let Some(ref ov) = *pipeline_overlay {
+                        ov.set_state(state);
+                    }
+                };
 
                 // Open the mic once at startup so the pre-roll buffer is
                 // already warm when the user first presses the hotkey.
@@ -93,18 +109,27 @@ fn main() -> eframe::Result<()> {
                                            target_hwnd: u64,
                                            long_dictate: bool,
                                            event_tx: &crossbeam_channel::Sender<AppEvent>,
-                                           flags: &Arc<Mutex<SharedFlags>>| {
+                                           flags: &Arc<Mutex<SharedFlags>>,
+                                           overlay: &Arc<Option<overlay::Overlay>>| {
                     let tx = event_tx.clone();
                     let flags = Arc::clone(flags);
+                    let ov = Arc::clone(overlay);
                     let prl = pre_roll_len;
                     let hwnd = target_hwnd;
                     let for_ld = long_dictate;
                     let cfg = Config::load();
 
                     rt.spawn(async move {
+                        let hide_overlay = || {
+                            if let Some(ref o) = *ov {
+                                o.set_state(overlay::STATE_HIDDEN);
+                            }
+                        };
+
                         // Guard: ignore clips where actual speech is shorter than 0.5s
                         let speech_samples = samples.len().saturating_sub(prl);
                         if speech_samples < (sample_rate / 2) as usize {
+                            hide_overlay();
                             let _ = tx.try_send(AppEvent::StatusUpdate(
                                 "Too short \u{2014} try again".into(),
                             ));
@@ -120,12 +145,14 @@ fn main() -> eframe::Result<()> {
                         let raw = match whisper::transcribe(samples, sample_rate, &cfg).await {
                             Ok(r) => r,
                             Err(e) => {
+                                hide_overlay();
                                 let _ = tx.try_send(AppEvent::Error(e.to_string()));
                                 return;
                             }
                         };
 
                         if raw.is_empty() {
+                            hide_overlay();
                             let _ = tx.try_send(AppEvent::StatusUpdate("No speech detected".into()));
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                             let _ = tx.try_send(AppEvent::StatusUpdate(
@@ -135,8 +162,16 @@ fn main() -> eframe::Result<()> {
                         }
 
                         let text = if cfg.cleanup_enabled {
+                            if let Some(ref o) = *ov {
+                                o.set_state(overlay::STATE_CLEANING);
+                            }
                             let _ = tx.try_send(AppEvent::StatusUpdate("Cleaning up\u{2026}".into()));
-                            cleanup::cleanup(&raw, &cfg).await
+                            let result = cleanup::cleanup(&raw, &cfg).await;
+                            if let Some(warning) = result.warning {
+                                let _ = tx.try_send(AppEvent::StatusUpdate(warning));
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                            result.text
                         } else {
                             raw.clone()
                         };
@@ -153,6 +188,7 @@ fn main() -> eframe::Result<()> {
                             }
                         }
 
+                        hide_overlay();
                         let _ = tx.try_send(AppEvent::Transcribed { text, raw, for_long_dictate: for_ld });
                     });
                 };
@@ -165,19 +201,21 @@ fn main() -> eframe::Result<()> {
                                 recording = true;
                                 target_hwnd = hwnd;
                                 pre_roll_len = recorder.start();
-                                // Capture long-dictate state NOW so it's correct even
-                                // if the user toggles Stop before transcription finishes
                                 long_dictate_at_start = flags.lock().unwrap().long_dictate_active;
+                                set_overlay(overlay::STATE_RECORDING);
+                                if sound_enabled { sound::play_start(); }
                                 let _ = event_tx.try_send(AppEvent::RecordingStarted);
                             }
                             hotkey::HotkeyEvent::RecordStop if recording => {
                                 recording = false;
                                 let samples = recorder.stop();
+                                set_overlay(overlay::STATE_TRANSCRIBING);
+                                if sound_enabled { sound::play_stop(); }
                                 let _ = event_tx.try_send(AppEvent::RecordingStopped);
                                 spawn_transcription(
                                     &rt, samples, sample_rate, pre_roll_len,
                                     target_hwnd, long_dictate_at_start,
-                                    &event_tx, &flags,
+                                    &event_tx, &flags, &pipeline_overlay,
                                 );
                             }
                             _ => {}
@@ -192,16 +230,20 @@ fn main() -> eframe::Result<()> {
                                 target_hwnd = 0; // Long Dictate never pastes
                                 pre_roll_len = recorder.start();
                                 long_dictate_at_start = true;
+                                set_overlay(overlay::STATE_RECORDING);
+                                if sound_enabled { sound::play_start(); }
                                 let _ = event_tx.try_send(AppEvent::RecordingStarted);
                             }
                             PipelineCmd::StopRecording if recording => {
                                 recording = false;
                                 let samples = recorder.stop();
+                                set_overlay(overlay::STATE_TRANSCRIBING);
+                                if sound_enabled { sound::play_stop(); }
                                 let _ = event_tx.try_send(AppEvent::RecordingStopped);
                                 spawn_transcription(
                                     &rt, samples, sample_rate, pre_roll_len,
                                     target_hwnd, long_dictate_at_start,
-                                    &event_tx, &flags,
+                                    &event_tx, &flags, &pipeline_overlay,
                                 );
                             }
                             _ => {}
@@ -214,9 +256,6 @@ fn main() -> eframe::Result<()> {
             .expect("failed to spawn pipeline thread");
     }
 
-    // ── Recording overlay (native always-on-top window) ─────────────────────
-    let rec_overlay = overlay::Overlay::new();
-
     // ── System tray ───────────────────────────────────────────────────────────
     let (tray, tray_menu_ids) = build_tray();
 
@@ -224,6 +263,7 @@ fn main() -> eframe::Result<()> {
     let store_for_app = Arc::clone(&store);
     let flags_for_app = Arc::clone(&flags);
     let config_for_app = config.clone();
+    let overlay_for_app = Arc::clone(&shared_overlay);
 
     eframe::run_native(
         "Phonix",
@@ -245,7 +285,7 @@ fn main() -> eframe::Result<()> {
                 cmd_tx,
                 tray,
                 tray_menu_ids,
-                rec_overlay,
+                overlay_for_app,
             )))
         }),
     )

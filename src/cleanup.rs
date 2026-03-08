@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde_json::json;
 
-use crate::config::Config;
+use crate::config::{CleanupProvider, Config};
 
 const SYSTEM_PROMPT: &str = "\
 Clean up this voice dictation. Remove filler words (um, uh, like, you know), \
@@ -9,27 +9,68 @@ fix repetitions, keep only the final version when the speaker corrects themselve
 add proper punctuation and capitalization. Preserve the speaker's voice. \
 Output ONLY the cleaned text, nothing else.";
 
+/// Result of a cleanup call, including any warning about provider fallback.
+pub struct CleanupResult {
+    pub text: String,
+    /// If set, the local LLM failed and we fell back to another provider.
+    pub warning: Option<String>,
+}
+
 /// Send raw Whisper output to the LLM for Wispr-style cleanup.
-/// On failure, returns the raw text unmodified — never blocks the pipeline.
-pub async fn cleanup(raw: &str, config: &Config) -> String {
+/// If the local provider fails and a Groq API key is available, falls back to Groq.
+/// On total failure, returns the raw text unmodified — never blocks the pipeline.
+pub async fn cleanup(raw: &str, config: &Config) -> CleanupResult {
     if !config.cleanup_enabled || raw.is_empty() {
-        return raw.to_string();
+        return CleanupResult { text: raw.to_string(), warning: None };
     }
 
     match call_lm(raw, config).await {
-        Ok(clean) => clean,
+        Ok(clean) => CleanupResult { text: clean, warning: None },
         Err(e) => {
-            eprintln!("[phonix/cleanup] LLM failed, using raw: {e}");
-            raw.to_string()
+            eprintln!("[phonix/cleanup] LLM failed: {e}");
+
+            // If local provider failed, try falling back to Groq
+            if config.cleanup_provider == CleanupProvider::Local
+                && !config.whisper_api_key.is_empty()
+            {
+                eprintln!("[phonix/cleanup] Falling back to Groq for cleanup");
+                match call_lm_with(
+                    raw,
+                    CleanupProvider::Groq.url(),
+                    CleanupProvider::Groq.model(),
+                    &config.whisper_api_key,
+                    30,
+                ).await {
+                    Ok(clean) => CleanupResult {
+                        text: clean,
+                        warning: Some("No local model loaded, cleaned up with Groq".into()),
+                    },
+                    Err(e2) => {
+                        eprintln!("[phonix/cleanup] Groq fallback also failed: {e2}");
+                        CleanupResult {
+                            text: raw.to_string(),
+                            warning: Some("Cleanup failed (local + Groq), using raw text".into()),
+                        }
+                    }
+                }
+            } else {
+                CleanupResult { text: raw.to_string(), warning: None }
+            }
         }
     }
 }
 
 async fn call_lm(raw: &str, config: &Config) -> Result<String> {
-    let url = format!("{}/chat/completions", config.cleanup_url().trim_end_matches('/'));
+    // Use a short timeout for local providers (should respond in <5s if model is loaded)
+    let timeout = if config.cleanup_provider == CleanupProvider::Local { 5 } else { 30 };
+    call_lm_with(raw, config.cleanup_url(), config.cleanup_model(), config.cleanup_key(), timeout).await
+}
+
+async fn call_lm_with(raw: &str, base_url: &str, model: &str, api_key: &str, timeout_secs: u64) -> Result<String> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
     let body = json!({
-        "model": config.cleanup_model(),
+        "model": model,
         "messages": [
             { "role": "system", "content": SYSTEM_PROMPT },
             { "role": "user",   "content": raw }
@@ -39,13 +80,12 @@ async fn call_lm(raw: &str, config: &Config) -> Result<String> {
     });
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()?;
     let mut req = client.post(&url).json(&body);
 
-    let key = config.cleanup_key();
-    if !key.is_empty() {
-        req = req.bearer_auth(key);
+    if !api_key.is_empty() {
+        req = req.bearer_auth(api_key);
     }
 
     let resp = req.send().await?;

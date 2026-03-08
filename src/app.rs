@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -77,11 +78,8 @@ pub struct PhonixApp {
     // System tray (lives on the main thread)
     tray: Option<tray_icon::TrayIcon>,
 
-    // Native always-on-top recording overlay
-    overlay: Option<crate::overlay::Overlay>,
-
-    // Tray menu item IDs for matching MenuEvent clicks
-    tray_menu_ids: Option<crate::TrayMenuIds>,
+    // Native always-on-top recording overlay (shared with pipeline thread)
+    overlay: Arc<Option<crate::overlay::Overlay>>,
 
     // Track the record key at startup so we can show a restart warning on change
     startup_record_key: String,
@@ -95,6 +93,9 @@ pub struct PhonixApp {
 
     // True when user explicitly clicked Quit in tray menu; bypasses close-to-tray
     force_quit: bool,
+
+    // Set by the tray event thread when user clicks "Open" or left-clicks the tray icon
+    tray_open_requested: Arc<AtomicBool>,
 }
 
 #[derive(PartialEq)]
@@ -114,9 +115,55 @@ impl PhonixApp {
         cmd_tx: Sender<PipelineCmd>,
         tray: Option<tray_icon::TrayIcon>,
         tray_menu_ids: Option<crate::TrayMenuIds>,
-        overlay: Option<crate::overlay::Overlay>,
+        overlay: Arc<Option<crate::overlay::Overlay>>,
     ) -> Self {
         Self::setup_theme(&cc.egui_ctx);
+
+        // Shared flag: tray event thread sets this when "Open" is clicked.
+        let tray_open_requested = Arc::new(AtomicBool::new(false));
+
+        // Spawn a dedicated thread for tray events so they work even when
+        // the egui window is hidden/minimized and update() isn't being called.
+        {
+            let ctx = cc.egui_ctx.clone();
+            let open_flag = Arc::clone(&tray_open_requested);
+            let quit_id = tray_menu_ids.as_ref().map(|ids| ids.quit.clone());
+            let open_id = tray_menu_ids.as_ref().map(|ids| ids.open.clone());
+
+            std::thread::Builder::new()
+                .name("phonix-tray-events".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+
+                    // Tray icon clicks (left-click to open)
+                    while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+                        if matches!(event, tray_icon::TrayIconEvent::Click { .. }) {
+                            open_flag.store(true, Ordering::Relaxed);
+                            ctx.request_repaint();
+                        }
+                    }
+
+                    // Tray right-click menu
+                    while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+                        if let Some(ref qid) = quit_id {
+                            if event.id == *qid {
+                                crate::server::WhisperServer::kill_stale();
+                                std::process::exit(0);
+                            }
+                        }
+                        if let Some(ref oid) = open_id {
+                            if event.id == *oid {
+                                open_flag.store(true, Ordering::Relaxed);
+                                ctx.request_repaint();
+                            }
+                        }
+                    }
+
+                    // Keep egui alive so pipeline events are processed while hidden
+                    ctx.request_repaint();
+                })
+                .expect("failed to spawn tray event thread");
+        }
 
         let startup_record_key = config.record_key.clone();
         Self {
@@ -132,13 +179,13 @@ impl PhonixApp {
             event_rx,
             cmd_tx,
             tray,
-            tray_menu_ids,
             overlay,
             startup_record_key,
             force_quit: false,
             focus_long_dictate_text: false,
             update_info: None,
             update_dismissed: false,
+            tray_open_requested,
         }
     }
 
@@ -224,10 +271,6 @@ impl PhonixApp {
 
 impl eframe::App for PhonixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Always repaint periodically so pipeline events (recording state,
-        // transcription results) are processed even when there's no user input.
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
-
         // ── Poll events from pipeline ─────────────────────────────────────────
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
@@ -235,7 +278,7 @@ impl eframe::App for PhonixApp {
                     self.is_recording = true;
                     self.status = "Recording...".into();
                     self.set_tray_recording(true);
-                    if let Some(ref ov) = self.overlay {
+                    if let Some(ref ov) = *self.overlay {
                         ov.set_state(crate::overlay::STATE_RECORDING);
                     }
                     if self.config.sound_enabled {
@@ -246,7 +289,7 @@ impl eframe::App for PhonixApp {
                     self.is_recording = false;
                     self.status = "Transcribing...".into();
                     self.set_tray_recording(false);
-                    if let Some(ref ov) = self.overlay {
+                    if let Some(ref ov) = *self.overlay {
                         ov.set_state(crate::overlay::STATE_TRANSCRIBING);
                     }
                     if self.config.sound_enabled {
@@ -255,7 +298,7 @@ impl eframe::App for PhonixApp {
                 }
                 AppEvent::Transcribed { text, raw, for_long_dictate } => {
                     self.status = "Ready - hold key to dictate".into();
-                    if let Some(ref ov) = self.overlay {
+                    if let Some(ref ov) = *self.overlay {
                         ov.set_state(crate::overlay::STATE_HIDDEN);
                     }
                     if for_long_dictate {
@@ -268,7 +311,7 @@ impl eframe::App for PhonixApp {
                     self.store.lock().unwrap().push(Entry::new(text, raw));
                 }
                 AppEvent::StatusUpdate(ref s) => {
-                    if let Some(ref ov) = self.overlay {
+                    if let Some(ref ov) = *self.overlay {
                         if s.contains("Cleaning") {
                             ov.set_state(crate::overlay::STATE_CLEANING);
                         } else if s.contains("Transcribing") {
@@ -280,7 +323,7 @@ impl eframe::App for PhonixApp {
                     self.status = s.clone();
                 }
                 AppEvent::Error(e) => {
-                    if let Some(ref ov) = self.overlay {
+                    if let Some(ref ov) = *self.overlay {
                         ov.set_state(crate::overlay::STATE_HIDDEN);
                     }
                     self.status = format!("Error: {e}");
@@ -291,37 +334,11 @@ impl eframe::App for PhonixApp {
             }
         }
 
-        // ── Poll tray events ────────────────────────────────────────────────
-        while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
-            if matches!(event, tray_icon::TrayIconEvent::Click { .. }) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            }
-        }
-
-        // ── Poll tray menu events (right-click menu) ────────────────────────
-        while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-            if let Some(ref ids) = self.tray_menu_ids {
-                if event.id == ids.open {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                } else if event.id == ids.quit {
-                    // Explicit tray Quit should always terminate the process,
-                    // even when close-to-tray is enabled.
-                    self.force_quit = true;
-                    self.config.close_to_tray = false;
-                    if let Some(ref ov) = self.overlay {
-                        ov.set_state(crate::overlay::STATE_HIDDEN);
-                    }
-                    self.tray = None;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-
-                    // Hard fallback: force process termination so we never
-                    // leave users stuck with a ghost process.
-                    crate::server::WhisperServer::kill_stale();
-                    std::process::exit(0);
-                }
-            }
+        // ── Check tray "Open" request (set by the tray event thread) ────────
+        // Quit is handled directly by the tray event thread via process::exit.
+        if self.tray_open_requested.swap(false, Ordering::Relaxed) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
         // Intercept window close → hide to tray instead (if enabled)
