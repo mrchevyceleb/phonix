@@ -3359,18 +3359,23 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "phonix"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "arboard",
  "chrono",
+ "cocoa",
+ "core-foundation 0.9.4",
+ "core-graphics",
  "cpal",
  "crossbeam-channel",
  "directories",
  "eframe",
  "egui",
  "hound",
+ "objc",
  "reqwest",
+ "rodio",
  "serde",
  "serde_json",
  "tokio",
@@ -3784,6 +3789,17 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rodio"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6006a627c1a38d37f3d3a85c6575418cfe34a5392d60a686d0071e1c8d427acb"
+dependencies = [
+ "cpal",
+ "hound",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

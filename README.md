@@ -1,14 +1,28 @@
 # Phonix
 
-**Local voice dictation for Windows.** Hold a key, speak, release. Text appears in any window.
+**Local voice dictation for Windows and macOS.** Hold a key, speak, release. Text appears in any window.
 
 Phonix captures audio via your microphone, sends it to a Whisper-compatible API for transcription, optionally cleans up the text with an LLM, and pastes the result directly into whatever app has focus. Terminals, browsers, email, IDEs, Slack -- it works everywhere.
 
 ## Download & Install
 
+### Windows
+
 **Installer:** Download `PhonixSetup-x.x.x.exe` from the [Releases](../../releases/latest) page. Includes Start Menu shortcut, optional desktop shortcut, and uninstaller.
 
 **Portable:** Download `phonix.exe` from the same page if you prefer a standalone binary with no installation.
+
+### macOS (Alpha)
+
+Download `Phonix-x.x.x-macos.dmg` from the [Releases](../../releases/latest) page. Open the DMG and drag Phonix to your Applications folder.
+
+**Important:** macOS support is alpha. It may have severe bugs. Please report issues on the [Issues](../../issues) page.
+
+On first launch, macOS will ask for two permissions:
+- **Microphone** -- required for voice capture
+- **Accessibility** (System Settings > Privacy & Security > Accessibility) -- required for hotkey detection and pasting text into other apps
+
+The app is not code-signed. Right-click > Open to bypass Gatekeeper on first launch.
 
 Phonix checks for updates automatically on launch and shows a notification banner if a newer version is available.
 
@@ -46,7 +60,7 @@ All settings are in the UI (Settings tab) and saved to:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Record key | `RightAlt` | Hold to record. Options: `RightAlt`, `LeftAlt`, `RightCtrl`, `LeftCtrl`, `RightShift`, `LeftShift`, `CapsLock`, `ScrollLock`, `F13`--`F16` |
+| Record key | `RightAlt` (Windows) / `F13` (macOS) | Hold to record. Options: `RightAlt`, `LeftAlt`, `RightCtrl`, `LeftCtrl`, `RightShift`, `LeftShift`, `CapsLock`, `ScrollLock` (Windows only), `F13`--`F16` |
 | Auto-paste | `true` | Type text into the active window after transcription |
 | Sound effect | `true` | Play a tone on record start/stop |
 | Close to tray | `true` | Hide to system tray instead of quitting when the window is closed |
@@ -83,7 +97,7 @@ cd phonix
 cargo build --release
 ```
 
-The binary is at `target/release/phonix.exe`.
+The binary is at `target/release/phonix.exe` (Windows) or `target/release/phonix` (macOS).
 
 ### Local Whisper Server (optional)
 
@@ -118,9 +132,9 @@ Hotkey release -> stop recording -> encode WAV -> Whisper API -> raw text
 ```
 
 - **Main thread** -- egui UI loop
-- **Hotkey thread** -- polls `GetAsyncKeyState` every 20ms
+- **Hotkey thread** -- polls key state every 20ms (`GetAsyncKeyState` on Windows, `CGEventSourceKeyState` on macOS)
 - **Pipeline thread** -- orchestrates recording, transcription, cleanup, paste
-- **Overlay thread** -- native GDI always-on-top status pill
+- **Overlay thread** -- native always-on-top status pill (GDI on Windows, NSWindow + CALayer on macOS)
 - **Tokio runtime** -- async HTTP for Whisper and LLM APIs
 
 Threads communicate via bounded crossbeam channels. The pipeline never blocks the UI.
@@ -132,6 +146,7 @@ Threads communicate via bounded crossbeam channels. The pipeline never blocks th
 - **tokio + reqwest** for async HTTP
 - **crossbeam-channel** for inter-thread communication
 - **windows crate** for native Windows APIs (hotkeys, SendInput, GDI overlay)
+- **cocoa/objc/core-graphics** for native macOS APIs (hotkeys, CGEvent paste, NSWindow overlay)
 - **serde + TOML** for configuration
 - **Inno Setup** for Windows installer
 
@@ -140,7 +155,7 @@ Threads communicate via bounded crossbeam channels. The pipeline never blocks th
 | Platform | Status |
 |----------|--------|
 | Windows 10/11 | Fully supported |
-| macOS | Planned |
+| macOS 12+ | Alpha (may have severe bugs) |
 | Linux | Planned |
 
 ## License

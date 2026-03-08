@@ -35,6 +35,7 @@ pub const KEY_GROUPS: &[(&str, usize, usize)] = &[
 ];
 
 /// Maps a human-readable key name (from config) to a Windows virtual key code.
+#[cfg(windows)]
 fn vk_for_name(name: &str) -> i32 {
     match name.to_lowercase().replace(['-', '_', ' '], "").as_str() {
         "rightalt" | "ralt" | "altgr" => 0xA5, // VK_RMENU
@@ -54,6 +55,36 @@ fn vk_for_name(name: &str) -> i32 {
             0xA5
         }
     }
+}
+
+/// Maps a human-readable key name (from config) to a macOS CGKeyCode.
+#[cfg(target_os = "macos")]
+fn vk_for_name(name: &str) -> i32 {
+    match name.to_lowercase().replace(['-', '_', ' '], "").as_str() {
+        "rightalt" | "ralt" | "altgr" | "rightoption" | "roption" => 0x3D,
+        "leftalt" | "lalt" | "leftoption" | "loption" => 0x3A,
+        "rightctrl" | "rightcontrol" | "rctrl" => 0x3E,
+        "leftctrl" | "leftcontrol" | "lctrl" => 0x3B,
+        "rightshift" | "rshift" => 0x3C,
+        "leftshift" | "lshift" => 0x38,
+        "capslock" => 0x39,
+        "scrolllock" => 0x69, // No macOS equivalent, map to F13
+        "f13" => 0x69,
+        "f14" => 0x6B,
+        "f15" => 0x71,
+        "f16" => 0x6A,
+        _ => {
+            eprintln!("[phonix/hotkey] unknown key '{}', defaulting to F13", name);
+            0x69 // F13
+        }
+    }
+}
+
+/// Fallback vk_for_name for unsupported platforms.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn vk_for_name(name: &str) -> i32 {
+    eprintln!("[phonix/hotkey] unsupported platform, key '{}' ignored", name);
+    0
 }
 
 /// Spawn a background thread that polls `GetAsyncKeyState` every 20ms.
@@ -111,8 +142,109 @@ fn get_foreground_window() -> u64 {
     unsafe { GetForegroundWindow().0 as u64 }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn is_key_down(vk: i32) -> bool {
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    CGEventSource::key_state(CGEventSourceStateID::HIDSystemState, vk as u16)
+}
+
+#[cfg(target_os = "macos")]
+fn get_foreground_window() -> u64 {
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let workspace: *mut objc::runtime::Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let app: *mut objc::runtime::Object = msg_send![workspace, frontmostApplication];
+        if app.is_null() {
+            return 0;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        pid as u64
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn is_key_down(_vk: i32) -> bool { false }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn get_foreground_window() -> u64 { 0 }
+
+/// Check if the app has Accessibility permission (macOS only).
+/// Returns true on non-macOS platforms.
+#[cfg(target_os = "macos")]
+pub fn check_accessibility() -> bool {
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// Prompt the user for Accessibility permission (macOS only).
+/// Shows the system dialog asking to grant permission.
+#[cfg(target_os = "macos")]
+pub fn prompt_accessibility() {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: core_foundation::base::CFTypeRef) -> bool;
+    }
+
+    let key = CFString::new("AXTrustedCheckOptionPrompt");
+    let value = CFBoolean::true_value();
+    let options = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
+    unsafe {
+        AXIsProcessTrustedWithOptions(options.as_CFTypeRef());
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn check_accessibility() -> bool { true }
+
+#[cfg(not(target_os = "macos"))]
+pub fn prompt_accessibility() {}
+
+/// Platform-filtered supported keys. Hides ScrollLock on macOS.
+pub fn supported_keys() -> &'static [(&'static str, &'static str)] {
+    #[cfg(target_os = "macos")]
+    {
+        const MACOS_KEYS: &[(&str, &str)] = &[
+            ("RightAlt", "Right Option"),
+            ("LeftAlt", "Left Option"),
+            ("RightCtrl", "Right Control"),
+            ("LeftCtrl", "Left Control"),
+            ("RightShift", "Right Shift"),
+            ("LeftShift", "Left Shift"),
+            ("CapsLock", "Caps Lock"),
+            ("F13", "F13"),
+            ("F14", "F14"),
+            ("F15", "F15"),
+            ("F16", "F16"),
+        ];
+        MACOS_KEYS
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        SUPPORTED_KEYS
+    }
+}
+
+/// Platform-filtered key groups for UI layout.
+pub fn key_groups() -> &'static [(&'static str, usize, usize)] {
+    #[cfg(target_os = "macos")]
+    {
+        const MACOS_GROUPS: &[(&str, usize, usize)] = &[
+            ("Option", 0, 2),
+            ("Control", 2, 4),
+            ("Shift", 4, 6),
+            ("Other", 6, 7),    // CapsLock only
+            ("Function", 7, 11),
+        ];
+        MACOS_GROUPS
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        KEY_GROUPS
+    }
+}

@@ -30,6 +30,14 @@ impl WhisperServer {
                 .creation_flags(CREATE_NO_WINDOW)
                 .status();
         }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("sh")
+                .args(["-c", "lsof -ti :8080 | xargs kill -9 2>/dev/null"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 
     /// Spawn the whisper server. Blocks briefly to install deps, then returns.
@@ -119,6 +127,17 @@ pub fn find_server_py() -> Option<PathBuf> {
     let p = exe_dir.join("whisper-server").join("server.py");
     if p.exists() {
         return Some(p);
+    }
+
+    // macOS .app bundle: binary is at Phonix.app/Contents/MacOS/phonix
+    // Resources are at Phonix.app/Contents/Resources/
+    let p = exe_dir
+        .parent()  // Contents/MacOS -> Contents
+        .map(|d| d.join("Resources").join("whisper-server").join("server.py"));
+    if let Some(p) = p {
+        if p.exists() {
+            return Some(p);
+        }
     }
 
     // Dev build: exe is at target/debug/ or target/release/ — go up to workspace root

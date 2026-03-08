@@ -68,14 +68,29 @@ fn is_newer(remote: &str, local: &str) -> bool {
     parse(remote) > parse(local)
 }
 
-/// Open a URL in the default browser (Windows).
+/// Open a URL in the default browser.
 pub fn open_in_browser(url: &str) {
     if !url.starts_with("https://") {
         return;
     }
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg(url)
+            .spawn();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn();
+    }
 }
 
 #[cfg(test)]

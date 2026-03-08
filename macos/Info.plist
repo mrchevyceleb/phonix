@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Phonix</string>
+    <key>CFBundleDisplayName</key>
+    <string>Phonix</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.phonix.app</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleExecutable</key>
+    <string>phonix</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Phonix needs microphone access to capture your voice for dictation.</string>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>Phonix needs Accessibility access to detect your hotkey and type text into other apps.</string>
+    <key>LSUIElement</key>
+    <false/>
+</dict>
+</plist>

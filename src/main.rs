@@ -1,5 +1,5 @@
 // Hide the console window in release builds — it's a GUI app
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod app;
 mod audio;
@@ -43,6 +43,17 @@ fn main() -> eframe::Result<()> {
     // ── Local Whisper server (auto-start when provider = Local) ───────────────
     // Keep _whisper_server alive until the app exits — Drop kills the process.
     let _whisper_server = maybe_start_local_server(&config, &event_tx);
+
+    // ── macOS Accessibility permission check ─────────────────────────────────
+    #[cfg(target_os = "macos")]
+    {
+        if !hotkey::check_accessibility() {
+            hotkey::prompt_accessibility();
+            let _ = event_tx.try_send(AppEvent::Error(
+                "Accessibility permission required. Grant it in System Settings > Privacy & Security > Accessibility, then restart Phonix.".into(),
+            ));
+        }
+    }
 
     // ── Hotkey polling thread ─────────────────────────────────────────────────
     hotkey::start_polling(config.record_key.clone(), hotkey_tx);

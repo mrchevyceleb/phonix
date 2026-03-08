@@ -53,7 +53,7 @@ fn wrap_wav(pcm: &[i16]) -> Vec<u8> {
 
 /// Play record-start sound (non-blocking).
 pub fn play_start() {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         // Silence pad so audio device initializes before the tone hits
         let mut pcm = silence_samples(80);
@@ -65,7 +65,7 @@ pub fn play_start() {
 
 /// Play record-stop sound (non-blocking).
 pub fn play_stop() {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let mut pcm = silence_samples(15);
         pcm.extend_from_slice(&tone_samples(520.0, 80));  // C5
@@ -85,6 +85,28 @@ fn play_wav_async(wav: Vec<u8>) {
             );
         }
         // Keep the buffer alive while playback completes
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn play_wav_async(wav: Vec<u8>) {
+    std::thread::spawn(move || {
+        use std::io::Cursor;
+        use rodio::{Decoder, OutputStream, Sink};
+
+        let Ok((_stream, stream_handle)) = OutputStream::try_default() else {
+            return;
+        };
+        let Ok(sink) = Sink::try_new(&stream_handle) else {
+            return;
+        };
+        let cursor = Cursor::new(wav);
+        let Ok(source) = Decoder::new(cursor) else {
+            return;
+        };
+        sink.append(source);
+        // Keep thread alive while sound plays
         std::thread::sleep(std::time::Duration::from_millis(400));
     });
 }

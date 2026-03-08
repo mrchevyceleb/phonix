@@ -52,8 +52,55 @@ jobs:
           path: target/installer/PhonixSetup-*.exe
           if-no-files-found: error
 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Create app bundle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          mkdir -p Phonix.app/Contents/MacOS
+          mkdir -p Phonix.app/Contents/Resources
+
+          cp target/release/phonix Phonix.app/Contents/MacOS/phonix
+          chmod +x Phonix.app/Contents/MacOS/phonix
+
+          # Copy whisper-server into Resources
+          cp -r whisper-server Phonix.app/Contents/Resources/whisper-server
+
+          # Generate Info.plist with correct version
+          sed "s/1.0.0/$VERSION/g" macos/Info.plist > Phonix.app/Contents/Info.plist
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "Phonix" -srcfolder Phonix.app -ov -format UDZO "Phonix-${GITHUB_REF_NAME#v}-macos.dmg"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: phonix-macos-dmg
+          path: Phonix-*.dmg
+          if-no-files-found: error
+
   release:
-    needs: [build-windows]
+    needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +117,12 @@ jobs:
           name: phonix-installer
           path: artifacts/installer
 
+      - name: Download macOS DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: phonix-macos-dmg
+          path: artifacts/macos
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -77,3 +130,4 @@ jobs:
           files: |
             artifacts/portable/phonix.exe
             artifacts/installer/PhonixSetup-*.exe
+            artifacts/macos/Phonix-*.dmg

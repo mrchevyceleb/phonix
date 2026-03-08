@@ -143,7 +143,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            record_key: "RightAlt".to_string(),
+            record_key: if cfg!(target_os = "macos") { "F13" } else { "RightAlt" }.to_string(),
             auto_paste: true,
             sound_enabled: true,
             close_to_tray: true,
@@ -236,11 +236,12 @@ impl Config {
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let mut cfg: Self = toml::from_str(&content).unwrap_or_default();
         if !SUPPORTED_KEYS.iter().any(|&(name, _)| name == cfg.record_key) {
+            let default_key = if cfg!(target_os = "macos") { "F13" } else { "RightAlt" };
             eprintln!(
-                "[phonix/config] invalid record_key '{}', resetting to RightAlt",
-                cfg.record_key
+                "[phonix/config] invalid record_key '{}', resetting to {}",
+                cfg.record_key, default_key
             );
-            cfg.record_key = "RightAlt".to_string();
+            cfg.record_key = default_key.to_string();
         }
         cfg
     }

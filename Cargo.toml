@@ -1,6 +1,6 @@
 [package]
 name = "phonix"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Local voice dictation — hold a key, speak, text appears anywhere"
 license = "MIT"
@@ -50,6 +50,13 @@ windows = { version = "0.58", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_Media_Audio",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+core-graphics = "0.23"
+cocoa = "0.25"
+objc = "0.2"
+rodio = { version = "0.19", default-features = false, features = ["wav"] }
 
 [profile.release]
 opt-level = 3

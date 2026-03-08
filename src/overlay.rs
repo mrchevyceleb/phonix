@@ -316,19 +316,250 @@ pub use win::Overlay;
 #[cfg(windows)]
 pub use win::{STATE_CLEANING, STATE_HIDDEN, STATE_RECORDING, STATE_TRANSCRIBING};
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::os::raw::c_void;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+
+    use cocoa::appkit::{
+        NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    };
+    use cocoa::base::{id, nil, NO, YES};
+    use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    const WIDTH: f64 = 180.0;
+    const HEIGHT: f64 = 36.0;
+
+    pub const STATE_HIDDEN: u8 = 0;
+    pub const STATE_RECORDING: u8 = 1;
+    pub const STATE_TRANSCRIBING: u8 = 2;
+    pub const STATE_CLEANING: u8 = 3;
+
+    /// Wrapper to send raw ObjC pointers across threads.
+    #[derive(Clone, Copy)]
+    struct SendId(id);
+    unsafe impl Send for SendId {}
+
+    pub struct Overlay {
+        state: Arc<AtomicU8>,
+    }
+
+    unsafe impl Send for Overlay {}
+
+    // ── GCD helpers ──────────────────────────────────────────────────────────
+
+    extern "C" {
+        fn dispatch_get_main_queue() -> id;
+        fn dispatch_async_f(queue: id, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    }
+
+    /// Dispatch a closure to the main thread via GCD. All AppKit operations
+    /// must happen on the main thread; the polling thread uses this to
+    /// marshal show/hide/update calls safely.
+    unsafe fn dispatch_on_main<F: FnOnce() + Send + 'static>(f: F) {
+        extern "C" fn trampoline<F: FnOnce()>(ctx: *mut c_void) {
+            unsafe { Box::from_raw(ctx as *mut F)() }
+        }
+        let ctx = Box::into_raw(Box::new(f)) as *mut c_void;
+        dispatch_async_f(dispatch_get_main_queue(), ctx, trampoline::<F>);
+    }
+
+    // ── Overlay ──────────────────────────────────────────────────────────────
+
+    impl Overlay {
+        /// Create the overlay. Must be called from the main thread (before
+        /// eframe::run_native takes over) so NSWindow creation is safe.
+        pub fn new() -> Option<Self> {
+            let state = Arc::new(AtomicU8::new(STATE_HIDDEN));
+            let state2 = Arc::clone(&state);
+
+            // Create window on the main thread (we are on it right now).
+            let (window, view) = unsafe { create_overlay_window() };
+            let w = SendId(window);
+            let v = SendId(view);
+
+            // Background thread polls the atomic state and dispatches
+            // AppKit show/hide/update calls to the main thread via GCD.
+            std::thread::Builder::new()
+                .name("phonix-overlay".into())
+                .spawn(move || {
+                    let mut prev_state = STATE_HIDDEN;
+
+                    loop {
+                        let cur = state2.load(Ordering::Relaxed);
+
+                        if cur != prev_state {
+                            let visible = cur != STATE_HIDDEN;
+                            let was_visible = prev_state != STATE_HIDDEN;
+                            let state_val = cur;
+
+                            unsafe {
+                                dispatch_on_main(move || {
+                                    let _pool = NSAutoreleasePool::new(nil);
+                                    if visible && !was_visible {
+                                        update_pill_view(v.0, state_val);
+                                        let _: () = msg_send![w.0, orderFrontRegardless];
+                                    } else if !visible && was_visible {
+                                        let _: () = msg_send![w.0, orderOut: nil];
+                                    } else if visible {
+                                        update_pill_view(v.0, state_val);
+                                        let _: () = msg_send![v.0, setNeedsDisplay: YES];
+                                    }
+                                });
+                            }
+                            prev_state = cur;
+                        }
+
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+                    }
+                })
+                .ok()?;
+
+            Some(Self { state })
+        }
+
+        pub fn set_state(&self, s: u8) {
+            self.state.store(s, Ordering::Relaxed);
+        }
+    }
+
+    /// Create the NSWindow + content view on the current (main) thread.
+    unsafe fn create_overlay_window() -> (id, id) {
+        let _pool = NSAutoreleasePool::new(nil);
+
+        let screen: id = msg_send![class!(NSScreen), mainScreen];
+        let screen_frame: NSRect = msg_send![screen, frame];
+        let screen_w = screen_frame.size.width;
+
+        let x = screen_w - WIDTH - 20.0;
+        let y = screen_frame.size.height - HEIGHT - 12.0; // macOS origin is bottom-left
+
+        let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(WIDTH, HEIGHT));
+        let style = NSWindowStyleMask::NSBorderlessWindowMask;
+        let window = NSWindow::alloc(nil).initWithContentRect_styleMask_backing_defer_(
+            frame,
+            style,
+            cocoa::appkit::NSBackingStoreType::NSBackingStoreBuffered,
+            NO,
+        );
+
+        window.setLevel_(20); // kCGStatusWindowLevel
+        window.setOpaque_(NO);
+        let clear: id = msg_send![class!(NSColor), clearColor];
+        window.setBackgroundColor_(clear);
+        let _: () = msg_send![window, setIgnoresMouseEvents: YES];
+        window.setCollectionBehavior_(
+            NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary,
+        );
+        let _: () = msg_send![window, setHasShadow: NO];
+
+        let view = create_pill_view();
+        window.setContentView_(view);
+
+        (window, view)
+    }
+
+    /// Create the layer-backed pill view with dot + text sublayers.
+    unsafe fn create_pill_view() -> id {
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, HEIGHT));
+        let view: id = msg_send![class!(NSView), alloc];
+        let view: id = msg_send![view, initWithFrame: frame];
+
+        let _: () = msg_send![view, setWantsLayer: YES];
+
+        let layer: id = msg_send![view, layer];
+        let _: () = msg_send![layer, setCornerRadius: HEIGHT / 2.0];
+        let _: () = msg_send![layer, setMasksToBounds: YES];
+
+        let bg_color: id = msg_send![class!(NSColor), colorWithRed:30.0/255.0 green:30.0/255.0 blue:30.0/255.0 alpha:220.0/255.0];
+        let cg_color: id = msg_send![bg_color, CGColor];
+        let _: () = msg_send![layer, setBackgroundColor: cg_color];
+
+        // Dot sublayer (index 0)
+        let dot_layer: id = msg_send![class!(CALayer), layer];
+        let dot_size = 12.0_f64;
+        let dot_frame = NSRect::new(
+            NSPoint::new(12.0, (HEIGHT - dot_size) / 2.0),
+            NSSize::new(dot_size, dot_size),
+        );
+        let _: () = msg_send![dot_layer, setFrame: dot_frame];
+        let _: () = msg_send![dot_layer, setCornerRadius: dot_size / 2.0];
+        let red: id = msg_send![class!(NSColor), colorWithRed:255.0/255.0 green:70.0/255.0 blue:70.0/255.0 alpha:1.0];
+        let red_cg: id = msg_send![red, CGColor];
+        let _: () = msg_send![dot_layer, setBackgroundColor: red_cg];
+        let _: () = msg_send![layer, addSublayer: dot_layer];
+
+        // Text sublayer (index 1)
+        let text_layer: id = msg_send![class!(CATextLayer), layer];
+        let text_frame = NSRect::new(
+            NSPoint::new(30.0, 0.0),
+            NSSize::new(WIDTH - 38.0, HEIGHT),
+        );
+        let _: () = msg_send![text_layer, setFrame: text_frame];
+        let font_size: f64 = 13.0;
+        let _: () = msg_send![text_layer, setFontSize: font_size];
+        let white: id = msg_send![class!(NSColor), whiteColor];
+        let white_cg: id = msg_send![white, CGColor];
+        let _: () = msg_send![text_layer, setForegroundColor: white_cg];
+        let _: () = msg_send![text_layer, setAlignmentMode: NSString::alloc(nil).init_str("left")];
+        let _: () = msg_send![text_layer, setContentsScale: 2.0f64]; // Retina
+        let _: () = msg_send![text_layer, setTruncationMode: NSString::alloc(nil).init_str("end")];
+        let font: id = msg_send![class!(NSFont), systemFontOfSize:font_size weight:0.4];
+        let _: () = msg_send![text_layer, setFont: font];
+        let _: () = msg_send![layer, addSublayer: text_layer];
+
+        view
+    }
+
+    /// Update the pill view's dot color and label text based on state.
+    unsafe fn update_pill_view(view: id, state: u8) {
+        let layer: id = msg_send![view, layer];
+        let sublayers: id = msg_send![layer, sublayers];
+        let count: usize = msg_send![sublayers, count];
+        if count < 2 {
+            return;
+        }
+
+        let dot_layer: id = msg_send![sublayers, objectAtIndex: 0usize];
+        let text_layer: id = msg_send![sublayers, objectAtIndex: 1usize];
+
+        let (r, g, b, label) = match state {
+            STATE_RECORDING => (255.0/255.0, 70.0/255.0, 70.0/255.0, "Recording"),
+            STATE_TRANSCRIBING => (255.0/255.0, 184.0/255.0, 64.0/255.0, "Transcribing\u{2026}"),
+            STATE_CLEANING => (32.0/255.0, 160.0/255.0, 224.0/255.0, "Cleaning up\u{2026}"),
+            _ => (255.0/255.0, 70.0/255.0, 70.0/255.0, "Recording"),
+        };
+
+        let color: id = msg_send![class!(NSColor), colorWithRed:r green:g blue:b alpha:1.0f64];
+        let cg_color: id = msg_send![color, CGColor];
+        let _: () = msg_send![dot_layer, setBackgroundColor: cg_color];
+
+        let ns_string = NSString::alloc(nil).init_str(label);
+        let _: () = msg_send![text_layer, setString: ns_string];
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use mac::Overlay;
+#[cfg(target_os = "macos")]
+pub use mac::{STATE_CLEANING, STATE_HIDDEN, STATE_RECORDING, STATE_TRANSCRIBING};
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct Overlay;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub const STATE_HIDDEN: u8 = 0;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub const STATE_RECORDING: u8 = 1;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub const STATE_TRANSCRIBING: u8 = 2;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub const STATE_CLEANING: u8 = 3;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Overlay {
     pub fn new() -> Option<Self> {
         Some(Self)
