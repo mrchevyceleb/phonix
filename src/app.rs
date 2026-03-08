@@ -495,7 +495,7 @@ impl PhonixApp {
             ui.add_space(12.0);
             ui.heading("Cleanup  (text → polished text)");
             ui.label(
-                RichText::new("Uses your local LM Studio model to remove filler words, fix sentences, etc.")
+                RichText::new("Removes filler words, fixes sentences. Uses same API key as Whisper when possible.")
                     .small()
                     .color(Color32::GRAY),
             );
@@ -504,26 +504,95 @@ impl PhonixApp {
                 .num_columns(2)
                 .spacing([12.0, 8.0])
                 .show(ui, |ui| {
+                    use crate::config::CleanupProvider;
+
                     ui.label("Enable cleanup");
                     ui.checkbox(&mut self.config.cleanup_enabled, "");
                     ui.end_row();
 
-                    ui.label("LM Studio URL");
-                    ui.text_edit_singleline(&mut self.config.cleanup_url);
+                    ui.label("Provider");
+                    ui.horizontal(|ui| {
+                        for provider in [CleanupProvider::Groq, CleanupProvider::OpenAI, CleanupProvider::Local] {
+                            let selected = self.config.cleanup_provider == provider;
+                            let label = provider.label();
+                            if ui.selectable_label(selected, label).clicked() {
+                                self.config.cleanup_provider = provider;
+                                self.config.cleanup_url_override.clear();
+                                self.config.cleanup_model_override.clear();
+                            }
+                        }
+                    });
                     ui.end_row();
 
-                    ui.label("API Key");
-                    ui.add(
-                        TextEdit::singleline(&mut self.config.cleanup_api_key)
-                            .password(true)
-                            .hint_text("lm-studio"),
+                    // Show whether key is shared from whisper
+                    let key_shared = self.config.cleanup_api_key.is_empty()
+                        && matches!(
+                            (&self.config.cleanup_provider, &self.config.whisper_provider),
+                            (CleanupProvider::Groq, crate::config::WhisperProvider::Groq)
+                                | (CleanupProvider::OpenAI, crate::config::WhisperProvider::OpenAI)
+                        );
+
+                    if key_shared {
+                        ui.label("API Key");
+                        ui.label(
+                            RichText::new("Using Whisper API key")
+                                .small()
+                                .color(Color32::from_rgb(80, 200, 100)),
+                        );
+                        ui.end_row();
+                    } else if self.config.cleanup_provider != CleanupProvider::Local {
+                        ui.label("API Key");
+                        ui.add(
+                            TextEdit::singleline(&mut self.config.cleanup_api_key)
+                                .password(true)
+                                .hint_text("leave blank to use Whisper key"),
+                        );
+                        ui.end_row();
+                    }
+
+                    // Show resolved endpoint + model
+                    ui.label("Endpoint");
+                    ui.label(
+                        RichText::new(self.config.cleanup_url())
+                            .small()
+                            .color(Color32::GRAY),
                     );
                     ui.end_row();
 
-                    ui.label("Model name");
-                    ui.text_edit_singleline(&mut self.config.cleanup_model);
+                    ui.label("Model");
+                    ui.label(
+                        RichText::new(self.config.cleanup_model())
+                            .small()
+                            .color(Color32::GRAY),
+                    );
                     ui.end_row();
                 });
+
+            // Advanced cleanup overrides
+            egui::CollapsingHeader::new(
+                RichText::new("Advanced — override cleanup URL / model").small(),
+            )
+            .default_open(false)
+            .show(ui, |ui| {
+                egui::Grid::new("g_cl_adv")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("URL override");
+                        ui.add(
+                            TextEdit::singleline(&mut self.config.cleanup_url_override)
+                                .hint_text("leave blank to use provider default"),
+                        );
+                        ui.end_row();
+
+                        ui.label("Model override");
+                        ui.add(
+                            TextEdit::singleline(&mut self.config.cleanup_model_override)
+                                .hint_text("leave blank to use provider default"),
+                        );
+                        ui.end_row();
+                    });
+            });
 
             ui.add_space(16.0);
             ui.horizontal(|ui| {

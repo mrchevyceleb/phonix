@@ -17,6 +17,46 @@ impl Default for WhisperProvider {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum CleanupProvider {
+    Groq,
+    OpenAI,
+    /// Local LM Studio or any OpenAI-compatible server
+    Local,
+}
+
+impl Default for CleanupProvider {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+impl CleanupProvider {
+    pub fn url(&self) -> &str {
+        match self {
+            Self::Groq => "https://api.groq.com/openai/v1",
+            Self::OpenAI => "https://api.openai.com/v1",
+            Self::Local => "http://localhost:1234/v1",
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Groq => "llama-3.3-70b-versatile",
+            Self::OpenAI => "gpt-4o-mini",
+            Self::Local => "local-model",
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Groq => "Groq (free)",
+            Self::OpenAI => "OpenAI (gpt-4o-mini)",
+            Self::Local => "Local (LM Studio)",
+        }
+    }
+}
+
 impl WhisperProvider {
     pub fn url(&self) -> &str {
         match self {
@@ -71,9 +111,23 @@ pub struct Config {
 
     // ── Cleanup LLM (text → polished text) ───────────────────────────────────
     pub cleanup_enabled: bool,
-    pub cleanup_url: String,
+    #[serde(default)]
+    pub cleanup_provider: CleanupProvider,
+    /// Override URL — leave blank to use provider default
+    #[serde(default)]
+    pub cleanup_url_override: String,
+    /// Separate API key for cleanup (only needed if provider differs from whisper)
+    #[serde(default)]
     pub cleanup_api_key: String,
-    pub cleanup_model: String,
+    /// Override model — leave blank to use provider default
+    #[serde(default)]
+    pub cleanup_model_override: String,
+
+    // Legacy fields kept for backwards-compatible deserialization
+    #[serde(default, rename = "cleanup_url", skip_serializing)]
+    _cleanup_url_legacy: String,
+    #[serde(default, rename = "cleanup_model", skip_serializing)]
+    _cleanup_model_legacy: String,
 }
 
 impl Default for Config {
@@ -89,9 +143,12 @@ impl Default for Config {
             whisper_model_override: String::new(),
 
             cleanup_enabled: true,
-            cleanup_url: "http://localhost:1234/v1".to_string(),
-            cleanup_api_key: "lm-studio".to_string(),
-            cleanup_model: "local-model".to_string(),
+            cleanup_provider: CleanupProvider::Local,
+            cleanup_url_override: String::new(),
+            cleanup_api_key: String::new(),
+            cleanup_model_override: String::new(),
+            _cleanup_url_legacy: String::new(),
+            _cleanup_model_legacy: String::new(),
         }
     }
 }
@@ -112,6 +169,43 @@ impl Config {
             &self.whisper_model_override
         } else {
             self.whisper_provider.model()
+        }
+    }
+
+    /// Resolved cleanup API URL
+    pub fn cleanup_url(&self) -> &str {
+        if !self.cleanup_url_override.is_empty() {
+            &self.cleanup_url_override
+        } else {
+            self.cleanup_provider.url()
+        }
+    }
+
+    /// Resolved cleanup model
+    pub fn cleanup_model(&self) -> &str {
+        if !self.cleanup_model_override.is_empty() {
+            &self.cleanup_model_override
+        } else {
+            self.cleanup_provider.model()
+        }
+    }
+
+    /// Resolved cleanup API key.
+    /// Reuses the whisper API key when both providers are the same cloud service.
+    pub fn cleanup_key(&self) -> &str {
+        if !self.cleanup_api_key.is_empty() {
+            return &self.cleanup_api_key;
+        }
+        // Auto-share whisper key when providers match
+        let same_cloud = matches!(
+            (&self.cleanup_provider, &self.whisper_provider),
+            (CleanupProvider::Groq, WhisperProvider::Groq)
+                | (CleanupProvider::OpenAI, WhisperProvider::OpenAI)
+        );
+        if same_cloud {
+            &self.whisper_api_key
+        } else {
+            &self.cleanup_api_key
         }
     }
 

@@ -35,10 +35,10 @@ pub async fn cleanup(raw: &str, config: &Config) -> String {
 }
 
 async fn call_lm(raw: &str, config: &Config) -> Result<String> {
-    let url = format!("{}/chat/completions", config.cleanup_url.trim_end_matches('/'));
+    let url = format!("{}/chat/completions", config.cleanup_url().trim_end_matches('/'));
 
     let body = json!({
-        "model": config.cleanup_model,
+        "model": config.cleanup_model(),
         "messages": [
             { "role": "system", "content": SYSTEM_PROMPT },
             { "role": "user",   "content": raw }
@@ -52,13 +52,14 @@ async fn call_lm(raw: &str, config: &Config) -> Result<String> {
         .build()?;
     let mut req = client.post(&url).json(&body);
 
-    if !config.cleanup_api_key.is_empty() {
-        req = req.bearer_auth(&config.cleanup_api_key);
+    let key = config.cleanup_key();
+    if !key.is_empty() {
+        req = req.bearer_auth(key);
     }
 
     let resp = req.send().await?;
     if !resp.status().is_success() {
-        anyhow::bail!("LM Studio {} — {}", resp.status(), resp.text().await?);
+        anyhow::bail!("Cleanup API {} — {}", resp.status(), resp.text().await?);
     }
 
     let json: serde_json::Value = resp.json().await?;
