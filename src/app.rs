@@ -6,8 +6,9 @@ use egui::{Align, Color32, Layout, RichText, ScrollArea, TextEdit, Vec2};
 
 use crate::store::{Entry, Store};
 use crate::config::Config;
+use crate::hotkey::{SUPPORTED_KEYS, KEY_GROUPS};
 
-// ── Theme ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Theme â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 struct Theme;
 
@@ -28,7 +29,7 @@ impl Theme {
     const DANGER:         Color32 = Color32::from_rgb(255, 80, 80);
 }
 
-// ── Events flowing FROM pipeline TO UI ────────────────────────────────────────
+// â”€â”€ Events flowing FROM pipeline TO UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub enum AppEvent {
     RecordingStarted,
@@ -38,14 +39,21 @@ pub enum AppEvent {
     Error(String),
 }
 
-// ── Shared state pipeline needs to read from UI ───────────────────────────────
+// ── Commands flowing FROM UI TO pipeline ─────────────────────────────────────
+
+pub enum PipelineCmd {
+    StartRecording,
+    StopRecording,
+}
+
+//â”€â”€ Shared state pipeline needs to read from UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub struct SharedFlags {
     pub long_dictate_active: bool,
     pub auto_paste: bool,
 }
 
-// ── App ───────────────────────────────────────────────────────────────────────
+// â”€â”€ App â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub struct PhonixApp {
     pub store: Arc<Mutex<Store>>,
@@ -62,15 +70,26 @@ pub struct PhonixApp {
 
     // Channel to receive events from the pipeline
     event_rx: crossbeam_channel::Receiver<AppEvent>,
-    // Channel to send ad-hoc commands (e.g. from settings save)
-    #[allow(dead_code)]
-    cmd_tx: Sender<()>,
+    // Channel to send commands to the pipeline (e.g. Start/Stop from Long Dictate)
+    cmd_tx: Sender<PipelineCmd>,
 
     // System tray (lives on the main thread)
     tray: Option<tray_icon::TrayIcon>,
 
     // Native always-on-top recording overlay
     overlay: Option<crate::overlay::Overlay>,
+
+    // Tray menu item IDs for matching MenuEvent clicks
+    tray_menu_ids: Option<crate::TrayMenuIds>,
+
+    // Track the record key at startup so we can show a restart warning on change
+    startup_record_key: String,
+
+    // Request focus on the Long Dictate text area after clicking Start
+    focus_long_dictate_text: bool,
+
+    // True when user explicitly clicked Quit in tray menu; bypasses close-to-tray
+    force_quit: bool,
 }
 
 #[derive(PartialEq)]
@@ -87,17 +106,19 @@ impl PhonixApp {
         config: Config,
         flags: Arc<Mutex<SharedFlags>>,
         event_rx: crossbeam_channel::Receiver<AppEvent>,
-        cmd_tx: Sender<()>,
+        cmd_tx: Sender<PipelineCmd>,
         tray: Option<tray_icon::TrayIcon>,
+        tray_menu_ids: Option<crate::TrayMenuIds>,
         overlay: Option<crate::overlay::Overlay>,
     ) -> Self {
         Self::setup_theme(&cc.egui_ctx);
 
+        let startup_record_key = config.record_key.clone();
         Self {
             store,
             config,
             flags,
-            status: "Ready — hold key to dictate".to_string(),
+            status: "Ready â€” hold key to dictate".to_string(),
             is_recording: false,
             active_tab: Tab::History,
             long_dictate_text: String::new(),
@@ -106,20 +127,24 @@ impl PhonixApp {
             event_rx,
             cmd_tx,
             tray,
+            tray_menu_ids,
             overlay,
+            startup_record_key,
+            force_quit: false,
+            focus_long_dictate_text: false,
         }
     }
 
     fn setup_theme(ctx: &egui::Context) {
         let mut visuals = egui::Visuals::dark();
 
-        // ── Base fills ───────────────────────────────────────────────
+        // â”€â”€ Base fills â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         visuals.panel_fill = Theme::BG_PANEL;
         visuals.window_fill = Theme::BG_PANEL;
         visuals.extreme_bg_color = Theme::BG_BASE;
         visuals.faint_bg_color = Theme::BG_CARD;
 
-        // ── Widget styles ────────────────────────────────────────────
+        // â”€â”€ Widget styles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         visuals.widgets.noninteractive.bg_fill = Theme::BG_CARD;
         visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, Theme::TEXT_SECONDARY);
         visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5, Theme::BORDER_SUBTLE);
@@ -147,7 +172,7 @@ impl PhonixApp {
         visuals.selection.bg_fill = Color32::from_rgba_premultiplied(100, 140, 255, 60);
         visuals.selection.stroke = egui::Stroke::new(1.0, Theme::ACCENT);
 
-        // ── Window chrome ────────────────────────────────────────────
+        // â”€â”€ Window chrome â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         visuals.window_shadow = egui::epaint::Shadow {
             offset: egui::Vec2::new(0.0, 2.0),
             blur: 8.0,
@@ -158,7 +183,7 @@ impl PhonixApp {
 
         ctx.set_visuals(visuals);
 
-        // ── Typography + spacing ─────────────────────────────────────
+        // â”€â”€ Typography + spacing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         let mut style = (*ctx.style()).clone();
 
         style.text_styles.insert(
@@ -196,12 +221,12 @@ impl eframe::App for PhonixApp {
         // transcription results) are processed even when there's no user input.
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
-        // ── Poll events from pipeline ─────────────────────────────────────────
+        // â”€â”€ Poll events from pipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 AppEvent::RecordingStarted => {
                     self.is_recording = true;
-                    self.status = "Recording…".into();
+                    self.status = "Recordingâ€¦".into();
                     self.set_tray_recording(true);
                     if let Some(ref ov) = self.overlay {
                         ov.set_state(crate::overlay::STATE_RECORDING);
@@ -212,7 +237,7 @@ impl eframe::App for PhonixApp {
                 }
                 AppEvent::RecordingStopped => {
                     self.is_recording = false;
-                    self.status = "Transcribing…".into();
+                    self.status = "Transcribingâ€¦".into();
                     self.set_tray_recording(false);
                     if let Some(ref ov) = self.overlay {
                         ov.set_state(crate::overlay::STATE_TRANSCRIBING);
@@ -222,7 +247,7 @@ impl eframe::App for PhonixApp {
                     }
                 }
                 AppEvent::Transcribed { text, raw, for_long_dictate } => {
-                    self.status = "Ready — hold key to dictate".into();
+                    self.status = "Ready â€” hold key to dictate".into();
                     if let Some(ref ov) = self.overlay {
                         ov.set_state(crate::overlay::STATE_HIDDEN);
                     }
@@ -256,7 +281,7 @@ impl eframe::App for PhonixApp {
             }
         }
 
-        // ── Poll tray events ────────────────────────────────────────────────
+        // â”€â”€ Poll tray events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
             if matches!(event, tray_icon::TrayIconEvent::Click { .. }) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -264,8 +289,21 @@ impl eframe::App for PhonixApp {
             }
         }
 
-        // Intercept window close → hide to tray instead (if enabled)
-        if ctx.input(|i| i.viewport().close_requested()) && self.config.close_to_tray {
+        // â”€â”€ Poll tray menu events (right-click menu) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+            if let Some(ref ids) = self.tray_menu_ids {
+                if event.id == ids.open {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                } else if event.id == ids.quit {
+                    self.force_quit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+
+        // Intercept window close â†’ hide to tray instead (if enabled)
+        if ctx.input(|i| i.viewport().close_requested()) && self.config.close_to_tray && !self.force_quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
@@ -293,7 +331,7 @@ impl eframe::App for PhonixApp {
             }
         }
 
-        // ── Render ────────────────────────────────────────────────────────────
+        // â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
@@ -316,7 +354,7 @@ impl eframe::App for PhonixApp {
 }
 
 impl PhonixApp {
-    // ── Header ────────────────────────────────────────────────────────────────
+    // â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn render_header(&mut self, ui: &mut egui::Ui) {
         let header_bg = if self.is_recording {
@@ -366,7 +404,7 @@ impl PhonixApp {
             });
     }
 
-    // ── Tabs ──────────────────────────────────────────────────────────────────
+    // â”€â”€ Tabs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn render_tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -406,7 +444,7 @@ impl PhonixApp {
         });
     }
 
-    // ── History ───────────────────────────────────────────────────────────────
+    // â”€â”€ History â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn render_history(&mut self, ui: &mut egui::Ui) {
         let entries = self.store.lock().unwrap().entries.clone();
@@ -415,7 +453,7 @@ impl PhonixApp {
             ui.add_space(80.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    RichText::new("🎙")
+                    RichText::new("ðŸŽ™")
                         .size(40.0)
                         .color(Color32::from_rgb(60, 60, 80)),
                 );
@@ -538,7 +576,7 @@ impl PhonixApp {
                                             .unwrap_or(false);
 
                                         let (copy_label, copy_color) = if flashing {
-                                            ("✓ Copied", Theme::SUCCESS)
+                                            ("âœ“ Copied", Theme::SUCCESS)
                                         } else {
                                             ("Copy", Theme::ACCENT)
                                         };
@@ -585,11 +623,9 @@ impl PhonixApp {
         }
     }
 
-    // ── Long Dictate ──────────────────────────────────────────────────────────
+    // â”€â”€ Long Dictate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn render_long_dictate(&mut self, ui: &mut egui::Ui) {
-        let is_active = self.flags.lock().unwrap().long_dictate_active;
-
         ui.add_space(4.0);
 
         // Control bar
@@ -599,10 +635,10 @@ impl PhonixApp {
             .inner_margin(egui::Margin::symmetric(12.0, 10.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let (btn_text, btn_color) = if is_active {
-                        ("⏹  Stop", Theme::DANGER)
+                    let (btn_text, btn_color) = if self.is_recording {
+                        ("â¹  Stop", Theme::DANGER)
                     } else {
-                        ("🎙  Start", Theme::SUCCESS)
+                        ("ðŸŽ™  Start", Theme::SUCCESS)
                     };
 
                     let start_btn = egui::Button::new(
@@ -618,13 +654,20 @@ impl PhonixApp {
                     .rounding(egui::Rounding::same(6.0));
 
                     if ui.add(start_btn).clicked() {
-                        self.flags.lock().unwrap().long_dictate_active = !is_active;
+                        if self.is_recording {
+                            self.flags.lock().unwrap().long_dictate_active = false;
+                            let _ = self.cmd_tx.try_send(PipelineCmd::StopRecording);
+                        } else {
+                            self.flags.lock().unwrap().long_dictate_active = true;
+                            let _ = self.cmd_tx.try_send(PipelineCmd::StartRecording);
+                            self.focus_long_dictate_text = true;
+                        }
                     }
 
                     ui.add_space(8.0);
 
                     let copy_btn = egui::Button::new(
-                        RichText::new("📋  Copy All")
+                        RichText::new("ðŸ“‹  Copy All")
                             .size(12.5)
                             .color(Theme::TEXT_SECONDARY),
                     )
@@ -647,7 +690,7 @@ impl PhonixApp {
                         self.long_dictate_text.clear();
                     }
 
-                    if is_active {
+                    if self.is_recording {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let t = ui.input(|i| i.time);
                             let pulse = (t * 3.0).sin() as f32 * 0.3 + 0.7;
@@ -655,7 +698,7 @@ impl PhonixApp {
                             let g = (80.0 * pulse) as u8;
                             let b = (80.0 * pulse) as u8;
                             ui.label(
-                                RichText::new("● Live")
+                                RichText::new("â— Live")
                                     .size(12.0)
                                     .color(Color32::from_rgb(r, g, b)),
                             );
@@ -677,28 +720,35 @@ impl PhonixApp {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.add_sized(
+                        let response = ui.add_sized(
                             Vec2::new(
                                 (available.x - 28.0).max(100.0),
                                 (available.y - 90.0).max(100.0),
                             ),
                             TextEdit::multiline(&mut self.long_dictate_text)
                                 .hint_text(
-                                    "Hold your record key to speak. \
-                                     Text accumulates here — copy when done.",
+                                    "Click Start to begin recording. \
+                                     Text accumulates here â€” copy when done.",
                                 )
                                 .font(egui::TextStyle::Body)
                                 .text_color(Color32::from_rgb(210, 210, 225)),
                         );
+                        if self.focus_long_dictate_text {
+                            if response.has_focus() {
+                                self.focus_long_dictate_text = false;
+                            } else {
+                                response.request_focus();
+                            }
+                        }
                     });
             });
     }
 
-    // ── Settings ──────────────────────────────────────────────────────────────
+    // â”€â”€ Settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn render_settings(&mut self, ui: &mut egui::Ui) {
         ScrollArea::vertical().show(ui, |ui| {
-            // ── Section: Recording ───────────────────────────────────────
+            // â”€â”€ Section: Recording â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             ui.add_space(4.0);
             egui::Frame::none()
                 .fill(Theme::BG_CARD)
@@ -707,7 +757,7 @@ impl PhonixApp {
                 .inner_margin(egui::Margin::symmetric(16.0, 14.0))
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new("⚙  Recording")
+                        RichText::new("âš™  Recording")
                             .size(15.0)
                             .strong()
                             .color(Theme::TEXT_HEADING),
@@ -721,7 +771,40 @@ impl PhonixApp {
                                 RichText::new("Record key")
                                     .color(Theme::TEXT_SECONDARY),
                             );
-                            ui.text_edit_singleline(&mut self.config.record_key);
+                            ui.vertical(|ui| {
+                                for &(group_label, start, end) in KEY_GROUPS {
+                                    ui.horizontal(|ui| {
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(55.0, 18.0),
+                                            Layout::left_to_right(Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(group_label)
+                                                        .size(11.0)
+                                                        .color(Theme::TEXT_MUTED),
+                                                );
+                                            },
+                                        );
+                                        for &(config_name, display_label) in &SUPPORTED_KEYS[start..end] {
+                                            let selected = self.config.record_key == config_name;
+                                            let text_color = if selected { Color32::WHITE } else { Theme::TEXT_SECONDARY };
+                                            let btn = egui::Button::new(
+                                                RichText::new(display_label).color(text_color).size(13.0),
+                                            )
+                                            .fill(if selected { Theme::ACCENT } else { Color32::TRANSPARENT })
+                                            .stroke(if selected {
+                                                egui::Stroke::new(1.0, Theme::ACCENT)
+                                            } else {
+                                                egui::Stroke::new(0.5, Theme::BORDER_SUBTLE)
+                                            })
+                                            .rounding(egui::Rounding::same(6.0));
+                                            if ui.add(btn).clicked() {
+                                                self.config.record_key = config_name.to_string();
+                                            }
+                                        }
+                                    });
+                                }
+                            });
                             ui.end_row();
 
                             ui.label(
@@ -756,7 +839,7 @@ impl PhonixApp {
                         });
                 });
 
-            // ── Section: Whisper ─────────────────────────────────────────
+            // â”€â”€ Section: Whisper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             ui.add_space(8.0);
             egui::Frame::none()
                 .fill(Theme::BG_CARD)
@@ -765,7 +848,7 @@ impl PhonixApp {
                 .inner_margin(egui::Margin::symmetric(16.0, 14.0))
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new("🎤  Whisper  (speech → text)")
+                        RichText::new("ðŸŽ¤  Whisper  (speech â†’ text)")
                             .size(15.0)
                             .strong()
                             .color(Theme::TEXT_HEADING),
@@ -791,7 +874,22 @@ impl PhonixApp {
                                     let selected =
                                         self.config.whisper_provider == provider;
                                     let label = provider.label();
-                                    if ui.selectable_label(selected, label).clicked() {
+                                    let text_color = if selected { Color32::WHITE } else { Theme::TEXT_SECONDARY };
+                                    let btn = egui::Button::new(
+                                        RichText::new(label).color(text_color).size(13.0),
+                                    )
+                                    .fill(if selected {
+                                        Theme::ACCENT
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .stroke(if selected {
+                                        egui::Stroke::new(1.0, Theme::ACCENT)
+                                    } else {
+                                        egui::Stroke::new(0.5, Theme::BORDER_SUBTLE)
+                                    })
+                                    .rounding(egui::Rounding::same(6.0));
+                                    if ui.add(btn).clicked() {
                                         self.config.whisper_provider = provider;
                                         self.config.whisper_url_override.clear();
                                         self.config.whisper_model_override.clear();
@@ -840,7 +938,7 @@ impl PhonixApp {
                     ui.add_space(4.0);
 
                     egui::CollapsingHeader::new(
-                        RichText::new("Advanced — override URL / model")
+                        RichText::new("Advanced â€” override URL / model")
                             .small()
                             .color(Theme::TEXT_SECONDARY),
                     )
@@ -877,7 +975,7 @@ impl PhonixApp {
                     });
                 });
 
-            // ── Section: Cleanup ─────────────────────────────────────────
+            // â”€â”€ Section: Cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             ui.add_space(8.0);
             egui::Frame::none()
                 .fill(Theme::BG_CARD)
@@ -886,7 +984,7 @@ impl PhonixApp {
                 .inner_margin(egui::Margin::symmetric(16.0, 14.0))
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new("✨  Cleanup  (text → polished text)")
+                        RichText::new("âœ¨  Cleanup  (text â†’ polished text)")
                             .size(15.0)
                             .strong()
                             .color(Theme::TEXT_HEADING),
@@ -927,7 +1025,22 @@ impl PhonixApp {
                                     let selected =
                                         self.config.cleanup_provider == provider;
                                     let label = provider.label();
-                                    if ui.selectable_label(selected, label).clicked() {
+                                    let text_color = if selected { Color32::WHITE } else { Theme::TEXT_SECONDARY };
+                                    let btn = egui::Button::new(
+                                        RichText::new(label).color(text_color).size(13.0),
+                                    )
+                                    .fill(if selected {
+                                        Theme::ACCENT
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .stroke(if selected {
+                                        egui::Stroke::new(1.0, Theme::ACCENT)
+                                    } else {
+                                        egui::Stroke::new(0.5, Theme::BORDER_SUBTLE)
+                                    })
+                                    .rounding(egui::Rounding::same(6.0));
+                                    if ui.add(btn).clicked() {
                                         self.config.cleanup_provider = provider;
                                         self.config.cleanup_url_override.clear();
                                         self.config.cleanup_model_override.clear();
@@ -989,7 +1102,7 @@ impl PhonixApp {
                     ui.add_space(4.0);
 
                     egui::CollapsingHeader::new(
-                        RichText::new("Advanced — override cleanup URL / model")
+                        RichText::new("Advanced â€” override cleanup URL / model")
                             .small()
                             .color(Theme::TEXT_SECONDARY),
                     )
@@ -1026,11 +1139,11 @@ impl PhonixApp {
                     });
                 });
 
-            // ── Save button ──────────────────────────────────────────────
+            // â”€â”€ Save button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 let save_btn = egui::Button::new(
-                    RichText::new("  💾  Save  ")
+                    RichText::new("  ðŸ’¾  Save  ")
                         .color(Color32::WHITE)
                         .size(14.0),
                 )
@@ -1049,7 +1162,7 @@ impl PhonixApp {
                     if t.elapsed().as_secs() < 2 {
                         ui.add_space(8.0);
                         ui.label(
-                            RichText::new("✓ Saved")
+                            RichText::new("âœ“ Saved")
                                 .color(Theme::SUCCESS)
                                 .strong(),
                         );
@@ -1057,16 +1170,18 @@ impl PhonixApp {
                 }
             });
 
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new("Record key changes take effect after restart.")
-                    .small()
-                    .color(Theme::TEXT_MUTED),
-            );
+            if self.config.record_key != self.startup_record_key {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("âš  Record key changed. Restart the app for it to take effect.")
+                        .small()
+                        .color(Color32::from_rgb(255, 190, 60)),
+                );
+            }
         });
     }
 
-    // ── Tray icon ─────────────────────────────────────────────────────────
+    // â”€â”€ Tray icon â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn set_tray_recording(&self, recording: bool) {
         if let Some(ref tray) = self.tray {
@@ -1085,6 +1200,7 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let cut = s.floor_char_boundary(max);
-        format!("{}…", &s[..cut])
+        format!("{}â€¦", &s[..cut])
     }
 }
+

@@ -3,6 +3,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::hotkey::SUPPORTED_KEYS;
+
 fn default_true() -> bool {
     true
 }
@@ -94,8 +96,8 @@ impl WhisperProvider {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Virtual key name for push-to-talk.
-    /// Options: "RightAlt", "RightControl", "LeftAlt", "LeftControl",
-    ///          "CapsLock", "ScrollLock", "F13"–"F16"
+    /// Options: "RightAlt", "LeftAlt", "RightCtrl", "LeftCtrl",
+    ///          "RightShift", "LeftShift", "CapsLock", "ScrollLock", "F13"–"F16"
     pub record_key: String,
 
     /// Automatically paste into the active window after transcription
@@ -232,7 +234,15 @@ impl Config {
             return cfg;
         }
         let content = std::fs::read_to_string(&path).unwrap_or_default();
-        toml::from_str(&content).unwrap_or_default()
+        let mut cfg: Self = toml::from_str(&content).unwrap_or_default();
+        if !SUPPORTED_KEYS.iter().any(|&(name, _)| name == cfg.record_key) {
+            eprintln!(
+                "[phonix/config] invalid record_key '{}', resetting to RightAlt",
+                cfg.record_key
+            );
+            cfg.record_key = "RightAlt".to_string();
+        }
+        cfg
     }
 
     pub fn save(&self) -> Result<()> {

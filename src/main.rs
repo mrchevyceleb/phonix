@@ -15,7 +15,7 @@ mod whisper;
 
 use std::sync::{Arc, Mutex};
 
-use app::{AppEvent, PhonixApp, SharedFlags};
+use app::{AppEvent, PhonixApp, PipelineCmd, SharedFlags};
 use audio::AudioRecorder;
 use config::Config;
 use crossbeam_channel::bounded;
@@ -33,7 +33,7 @@ fn main() -> eframe::Result<()> {
 
     // Channels
     let (event_tx, event_rx) = bounded::<AppEvent>(32);
-    let (cmd_tx, _cmd_rx) = bounded::<()>(8);
+    let (cmd_tx, cmd_rx) = bounded::<PipelineCmd>(8);
     let (hotkey_tx, hotkey_rx) = bounded::<hotkey::HotkeyEvent>(8);
 
     // ── Local Whisper server (auto-start when provider = Local) ───────────────
@@ -48,6 +48,7 @@ fn main() -> eframe::Result<()> {
         let _config = config.clone(); // retained for potential future use
         let flags = Arc::clone(&flags);
         let event_tx = event_tx.clone();
+        let cmd_rx = cmd_rx;
 
         std::thread::Builder::new()
             .name("phonix-pipeline".into())
@@ -69,6 +70,78 @@ fn main() -> eframe::Result<()> {
                     }
                 }
 
+                // Helper: spawn the transcription task on the tokio runtime
+                let spawn_transcription = |rt: &Runtime,
+                                           samples: Vec<f32>,
+                                           sample_rate: u32,
+                                           pre_roll_len: usize,
+                                           target_hwnd: u64,
+                                           long_dictate: bool,
+                                           event_tx: &crossbeam_channel::Sender<AppEvent>,
+                                           flags: &Arc<Mutex<SharedFlags>>| {
+                    let tx = event_tx.clone();
+                    let flags = Arc::clone(flags);
+                    let prl = pre_roll_len;
+                    let hwnd = target_hwnd;
+                    let for_ld = long_dictate;
+                    let cfg = Config::load();
+
+                    rt.spawn(async move {
+                        // Guard: ignore clips where actual speech is shorter than 0.5s
+                        let speech_samples = samples.len().saturating_sub(prl);
+                        if speech_samples < (sample_rate / 2) as usize {
+                            let _ = tx.try_send(AppEvent::StatusUpdate(
+                                "Too short \u{2014} try again".into(),
+                            ));
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            let _ = tx.try_send(AppEvent::StatusUpdate(
+                                "Ready \u{2014} hold key to dictate".into(),
+                            ));
+                            return;
+                        }
+
+                        let _ = tx.try_send(AppEvent::StatusUpdate("Transcribing\u{2026}".into()));
+
+                        let raw = match whisper::transcribe(samples, sample_rate, &cfg).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let _ = tx.try_send(AppEvent::Error(e.to_string()));
+                                return;
+                            }
+                        };
+
+                        if raw.is_empty() {
+                            let _ = tx.try_send(AppEvent::StatusUpdate("No speech detected".into()));
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            let _ = tx.try_send(AppEvent::StatusUpdate(
+                                "Ready \u{2014} hold key to dictate".into(),
+                            ));
+                            return;
+                        }
+
+                        let text = if cfg.cleanup_enabled {
+                            let _ = tx.try_send(AppEvent::StatusUpdate("Cleaning up\u{2026}".into()));
+                            cleanup::cleanup(&raw, &cfg).await
+                        } else {
+                            raw.clone()
+                        };
+
+                        // Auto-paste unless in long dictate mode
+                        let do_paste = {
+                            let f = flags.lock().unwrap();
+                            f.auto_paste
+                        } && !for_ld;
+
+                        if do_paste {
+                            if let Err(e) = paste::paste(&text, hwnd) {
+                                eprintln!("[phonix/paste] {e}");
+                            }
+                        }
+
+                        let _ = tx.try_send(AppEvent::Transcribed { text, raw, for_long_dictate: for_ld });
+                    });
+                };
+
                 loop {
                     // Drain hotkey events
                     while let Ok(ev) = hotkey_rx.try_recv() {
@@ -86,71 +159,35 @@ fn main() -> eframe::Result<()> {
                                 recording = false;
                                 let samples = recorder.stop();
                                 let _ = event_tx.try_send(AppEvent::RecordingStopped);
+                                spawn_transcription(
+                                    &rt, samples, sample_rate, pre_roll_len,
+                                    target_hwnd, long_dictate_at_start,
+                                    &event_tx, &flags,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
 
-                                // Spawn async task for transcribe + cleanup + paste
-                                // Always reload from disk so settings changes take effect immediately
-                                let cfg = Config::load();
-                                let hwnd = target_hwnd;
-                                let tx = event_tx.clone();
-                                let flags = Arc::clone(&flags);
-                                let prl = pre_roll_len;
-                                let for_ld = long_dictate_at_start;
-
-                                rt.spawn(async move {
-                                    // Guard: ignore clips where actual speech is shorter than 0.5s
-                                    // (subtract pre-roll since that's ambient noise, not speech)
-                                    let speech_samples = samples.len().saturating_sub(prl);
-                                    if speech_samples < (sample_rate / 2) as usize {
-                                        let _ = tx.try_send(AppEvent::StatusUpdate(
-                                            "Too short — try again".into(),
-                                        ));
-                                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                        let _ = tx.try_send(AppEvent::StatusUpdate(
-                                            "Ready — hold key to dictate".into(),
-                                        ));
-                                        return;
-                                    }
-
-                                    let _ = tx.try_send(AppEvent::StatusUpdate("Transcribing…".into()));
-
-                                    let raw = match whisper::transcribe(samples, sample_rate, &cfg).await {
-                                        Ok(r) => r,
-                                        Err(e) => {
-                                            let _ = tx.try_send(AppEvent::Error(e.to_string()));
-                                            return;
-                                        }
-                                    };
-
-                                    if raw.is_empty() {
-                                        let _ = tx.try_send(AppEvent::StatusUpdate("No speech detected".into()));
-                                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                        let _ = tx.try_send(AppEvent::StatusUpdate(
-                                            "Ready — hold key to dictate".into(),
-                                        ));
-                                        return;
-                                    }
-
-                                    let text = if cfg.cleanup_enabled {
-                                        let _ = tx.try_send(AppEvent::StatusUpdate("Cleaning up…".into()));
-                                        cleanup::cleanup(&raw, &cfg).await
-                                    } else {
-                                        raw.clone()
-                                    };
-
-                                    // Auto-paste unless in long dictate mode
-                                    let do_paste = {
-                                        let f = flags.lock().unwrap();
-                                        f.auto_paste
-                                    } && !for_ld;
-
-                                    if do_paste {
-                                        if let Err(e) = paste::paste(&text, hwnd) {
-                                            eprintln!("[phonix/paste] {e}");
-                                        }
-                                    }
-
-                                    let _ = tx.try_send(AppEvent::Transcribed { text, raw, for_long_dictate: for_ld });
-                                });
+                    // Drain UI commands (Long Dictate Start/Stop button)
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        match cmd {
+                            PipelineCmd::StartRecording if !recording => {
+                                recording = true;
+                                target_hwnd = 0; // Long Dictate never pastes
+                                pre_roll_len = recorder.start();
+                                long_dictate_at_start = true;
+                                let _ = event_tx.try_send(AppEvent::RecordingStarted);
+                            }
+                            PipelineCmd::StopRecording if recording => {
+                                recording = false;
+                                let samples = recorder.stop();
+                                let _ = event_tx.try_send(AppEvent::RecordingStopped);
+                                spawn_transcription(
+                                    &rt, samples, sample_rate, pre_roll_len,
+                                    target_hwnd, long_dictate_at_start,
+                                    &event_tx, &flags,
+                                );
                             }
                             _ => {}
                         }
@@ -166,7 +203,7 @@ fn main() -> eframe::Result<()> {
     let rec_overlay = overlay::Overlay::new();
 
     // ── System tray ───────────────────────────────────────────────────────────
-    let tray = build_tray();
+    let (tray, tray_menu_ids) = build_tray();
 
     // ── egui window ───────────────────────────────────────────────────────────
     let store_for_app = Arc::clone(&store);
@@ -192,6 +229,7 @@ fn main() -> eframe::Result<()> {
                 event_rx,
                 cmd_tx,
                 tray,
+                tray_menu_ids,
                 rec_overlay,
             )))
         }),
@@ -252,22 +290,39 @@ fn maybe_start_local_server(
 
 // ── Tray icon ─────────────────────────────────────────────────────────────────
 
-fn build_tray() -> Option<tray_icon::TrayIcon> {
+/// IDs returned alongside the tray icon so the app can match menu events.
+pub struct TrayMenuIds {
+    pub open: tray_icon::menu::MenuId,
+    pub quit: tray_icon::menu::MenuId,
+}
+
+fn build_tray() -> (Option<tray_icon::TrayIcon>, Option<TrayMenuIds>) {
     use tray_icon::{
         menu::{Menu, MenuItem},
         TrayIconBuilder,
     };
 
     let menu = Menu::new();
-    let _ = menu.append(&MenuItem::new("Open Phonix", true, None));
-    let _ = menu.append(&MenuItem::new("Quit", true, None));
+    let open_item = MenuItem::new("Open Phonix", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+    let _ = menu.append(&open_item);
+    let _ = menu.append(&quit_item);
 
-    TrayIconBuilder::new()
+    let ids = TrayMenuIds {
+        open: open_item.id().clone(),
+        quit: quit_item.id().clone(),
+    };
+
+    match TrayIconBuilder::new()
         .with_tooltip("Phonix — voice dictation")
         .with_icon(make_tray_icon_rgb(100, 180, 255))
         .with_menu(Box::new(menu))
         .build()
         .ok()
+    {
+        Some(tray) => (Some(tray), Some(ids)),
+        None => (None, None),
+    }
 }
 
 /// Generate RGBA pixel data for a microphone-in-circle icon.

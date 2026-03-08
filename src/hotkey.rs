@@ -8,6 +8,32 @@ pub enum HotkeyEvent {
     RecordStop,
 }
 
+/// All supported push-to-talk keys as `(config_name, display_label)`.
+pub const SUPPORTED_KEYS: &[(&str, &str)] = &[
+    ("RightAlt", "Right Alt"),
+    ("LeftAlt", "Left Alt"),
+    ("RightCtrl", "Right Ctrl"),
+    ("LeftCtrl", "Left Ctrl"),
+    ("RightShift", "Right Shift"),
+    ("LeftShift", "Left Shift"),
+    ("CapsLock", "Caps Lock"),
+    ("ScrollLock", "Scroll Lock"),
+    ("F13", "F13"),
+    ("F14", "F14"),
+    ("F15", "F15"),
+    ("F16", "F16"),
+];
+
+/// Groups of key indices into SUPPORTED_KEYS for UI layout.
+/// Each entry is `(group_label, start_index, end_index_exclusive)`.
+pub const KEY_GROUPS: &[(&str, usize, usize)] = &[
+    ("Alt", 0, 2),
+    ("Ctrl", 2, 4),
+    ("Shift", 4, 6),
+    ("Locks", 6, 8),
+    ("Function", 8, 12),
+];
+
 /// Maps a human-readable key name (from config) to a Windows virtual key code.
 fn vk_for_name(name: &str) -> i32 {
     match name.to_lowercase().replace(['-', '_', ' '], "").as_str() {
