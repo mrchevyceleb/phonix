@@ -1,24 +1,21 @@
-/// Play a system sound on record start.
+/// Play an audible tone on record start (background thread, non-blocking).
 pub fn play_start() {
     #[cfg(windows)]
-    {
-        use windows::Win32::System::Diagnostics::Debug::MessageBeep;
-        use windows::Win32::UI::WindowsAndMessaging::MB_OK;
+    std::thread::spawn(|| {
+        use windows::Win32::System::Diagnostics::Debug::Beep;
         unsafe {
-            let _ = MessageBeep(MB_OK);
+            let _ = Beep(880, 120); // A5 — short high chirp
         }
-    }
+    });
 }
 
-/// Play a different system sound on record stop.
+/// Play an audible tone on record stop (background thread, non-blocking).
 pub fn play_stop() {
     #[cfg(windows)]
-    {
-        use windows::Win32::System::Diagnostics::Debug::MessageBeep;
-        use windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE;
+    std::thread::spawn(|| {
+        use windows::Win32::System::Diagnostics::Debug::Beep;
         unsafe {
-            // MB_ICONASTERISK = 0x40 — plays the "asterisk" system sound
-            let _ = MessageBeep(MESSAGEBOX_STYLE(0x00000040));
+            let _ = Beep(440, 120); // A4 — short low chirp
         }
-    }
+    });
 }

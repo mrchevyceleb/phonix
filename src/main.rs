@@ -58,6 +58,7 @@ fn main() -> eframe::Result<()> {
                 let mut recording = false;
                 let mut target_hwnd: u64 = 0;
                 let mut pre_roll_len: usize = 0;
+                let mut long_dictate_at_start = false;
 
                 // Open the mic once at startup so the pre-roll buffer is
                 // already warm when the user first presses the hotkey.
@@ -76,6 +77,9 @@ fn main() -> eframe::Result<()> {
                                 recording = true;
                                 target_hwnd = hwnd;
                                 pre_roll_len = recorder.start();
+                                // Capture long-dictate state NOW so it's correct even
+                                // if the user toggles Stop before transcription finishes
+                                long_dictate_at_start = flags.lock().unwrap().long_dictate_active;
                                 let _ = event_tx.send(AppEvent::RecordingStarted);
                             }
                             hotkey::HotkeyEvent::RecordStop if recording => {
@@ -90,6 +94,7 @@ fn main() -> eframe::Result<()> {
                                 let tx = event_tx.clone();
                                 let flags = Arc::clone(&flags);
                                 let prl = pre_roll_len;
+                                let for_ld = long_dictate_at_start;
 
                                 rt.spawn(async move {
                                     // Guard: ignore clips where actual speech is shorter than 0.5s
@@ -135,8 +140,8 @@ fn main() -> eframe::Result<()> {
                                     // Auto-paste unless in long dictate mode
                                     let do_paste = {
                                         let f = flags.lock().unwrap();
-                                        f.auto_paste && !f.long_dictate_active
-                                    };
+                                        f.auto_paste
+                                    } && !for_ld;
 
                                     if do_paste {
                                         if let Err(e) = paste::paste(&text, hwnd) {
@@ -144,7 +149,7 @@ fn main() -> eframe::Result<()> {
                                         }
                                     }
 
-                                    let _ = tx.send(AppEvent::Transcribed { text, raw });
+                                    let _ = tx.send(AppEvent::Transcribed { text, raw, for_long_dictate: for_ld });
                                 });
                             }
                             _ => {}

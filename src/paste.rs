@@ -27,13 +27,16 @@ pub fn paste(text: &str, target_hwnd: u64) -> Result<()> {
 fn focus_window(hwnd: u64) {
     use windows::Win32::Foundation::HWND as WinHWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
     };
 
     let hwnd = WinHWND(hwnd as *mut std::ffi::c_void);
     unsafe {
-        let _ = ShowWindow(hwnd, SW_RESTORE);
-        let _ = BringWindowToTop(hwnd);
+        // Only restore if the window is minimized. Calling SW_RESTORE on a
+        // maximized window (e.g. VS Code) would un-maximize it.
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
         let _ = SetForegroundWindow(hwnd);
     }
 }

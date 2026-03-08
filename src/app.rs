@@ -12,7 +12,7 @@ use crate::config::Config;
 pub enum AppEvent {
     RecordingStarted,
     RecordingStopped,
-    Transcribed { text: String, raw: String },
+    Transcribed { text: String, raw: String, for_long_dictate: bool },
     StatusUpdate(String),
     Error(String),
 }
@@ -105,7 +105,7 @@ impl eframe::App for PhonixApp {
                     self.status = "Recording…".into();
                     self.set_tray_recording(true);
                     if let Some(ref ov) = self.overlay {
-                        ov.show();
+                        ov.set_state(crate::overlay::STATE_RECORDING);
                     }
                     if self.config.sound_enabled {
                         crate::sound::play_start();
@@ -116,16 +116,19 @@ impl eframe::App for PhonixApp {
                     self.status = "Transcribing…".into();
                     self.set_tray_recording(false);
                     if let Some(ref ov) = self.overlay {
-                        ov.hide();
+                        ov.set_state(crate::overlay::STATE_TRANSCRIBING);
                     }
                     if self.config.sound_enabled {
                         crate::sound::play_stop();
                     }
                 }
-                AppEvent::Transcribed { text, raw } => {
+                AppEvent::Transcribed { text, raw, for_long_dictate } => {
                     self.status = "Ready — hold key to dictate".into();
-                    // Append to long dictate area if that mode is on
-                    if self.flags.lock().unwrap().long_dictate_active {
+                    if let Some(ref ov) = self.overlay {
+                        ov.set_state(crate::overlay::STATE_HIDDEN);
+                    }
+                    // Append to long dictate if recording was started in that mode
+                    if for_long_dictate {
                         if !self.long_dictate_text.is_empty() {
                             self.long_dictate_text.push(' ');
                         }
@@ -134,8 +137,25 @@ impl eframe::App for PhonixApp {
                     }
                     self.store.lock().unwrap().push(Entry::new(text, raw));
                 }
-                AppEvent::StatusUpdate(s) => self.status = s,
-                AppEvent::Error(e) => self.status = format!("Error: {e}"),
+                AppEvent::StatusUpdate(ref s) => {
+                    // Update overlay to match pipeline state
+                    if let Some(ref ov) = self.overlay {
+                        if s.contains("Cleaning") {
+                            ov.set_state(crate::overlay::STATE_CLEANING);
+                        } else if s.contains("Transcribing") {
+                            ov.set_state(crate::overlay::STATE_TRANSCRIBING);
+                        } else if s.contains("Ready") {
+                            ov.set_state(crate::overlay::STATE_HIDDEN);
+                        }
+                    }
+                    self.status = s.clone();
+                }
+                AppEvent::Error(e) => {
+                    if let Some(ref ov) = self.overlay {
+                        ov.set_state(crate::overlay::STATE_HIDDEN);
+                    }
+                    self.status = format!("Error: {e}");
+                }
             }
         }
 

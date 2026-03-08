@@ -1,33 +1,39 @@
-/// Native Windows always-on-top recording indicator.
-/// Shows a small dark pill with a red dot and "REC" text near the top-right corner.
+/// Native Windows always-on-top status pill.
+/// Shows recording / transcribing / cleaning-up state near the top-right corner.
 #[cfg(windows)]
 mod win {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::Arc;
 
     use windows::core::w;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, Ellipse, EndPaint,
-        FillRect, GetStockObject, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
-        NULL_PEN, PAINTSTRUCT, TRANSPARENT,
+        FillRect, GetStockObject, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
+        SetWindowRgn, NULL_PEN, PAINTSTRUCT, TRANSPARENT,
     };
     use windows::Win32::UI::WindowsAndMessaging::*;
 
-    const WIDTH: i32 = 84;
-    const HEIGHT: i32 = 32;
+    const WIDTH: i32 = 180;
+    const HEIGHT: i32 = 36;
     const CLASS_NAME: windows::core::PCWSTR = w!("PhonixRecOverlay");
 
+    /// Overlay states (stored as AtomicU8)
+    pub const STATE_HIDDEN: u8 = 0;
+    pub const STATE_RECORDING: u8 = 1;
+    pub const STATE_TRANSCRIBING: u8 = 2;
+    pub const STATE_CLEANING: u8 = 3;
+
     pub struct Overlay {
-        visible: Arc<AtomicBool>,
+        state: Arc<AtomicU8>,
     }
 
     unsafe impl Send for Overlay {}
 
     impl Overlay {
         pub fn new() -> Option<Self> {
-            let visible = Arc::new(AtomicBool::new(false));
-            let visible2 = Arc::clone(&visible);
+            let state = Arc::new(AtomicU8::new(STATE_HIDDEN));
+            let state2 = Arc::clone(&state);
 
             std::thread::Builder::new()
                 .name("phonix-overlay".into())
@@ -42,15 +48,27 @@ mod win {
                     let rgn = CreateRoundRectRgn(0, 0, WIDTH + 1, HEIGHT + 1, HEIGHT, HEIGHT);
                     SetWindowRgn(hwnd, rgn, false);
 
-                    loop {
-                        let want = visible2.load(Ordering::Relaxed);
-                        let is = IsWindowVisible(hwnd).as_bool();
+                    // Store state pointer in window user data so wnd_proc can read it
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::into_raw(Arc::clone(&state2)) as isize);
 
-                        if want && !is {
+                    let mut prev_state = STATE_HIDDEN;
+
+                    loop {
+                        let cur = state2.load(Ordering::Relaxed);
+                        let visible = cur != STATE_HIDDEN;
+                        let is_visible = IsWindowVisible(hwnd).as_bool();
+
+                        if visible && !is_visible {
                             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                        } else if !want && is {
+                        } else if !visible && is_visible {
                             let _ = ShowWindow(hwnd, SW_HIDE);
                         }
+
+                        // If state changed while visible, force a repaint
+                        if cur != prev_state && visible {
+                            let _ = InvalidateRect(hwnd, None, true);
+                        }
+                        prev_state = cur;
 
                         // Pump messages for this window
                         let mut msg = MSG::default();
@@ -64,15 +82,11 @@ mod win {
                 })
                 .ok()?;
 
-            Some(Self { visible })
+            Some(Self { state })
         }
 
-        pub fn show(&self) {
-            self.visible.store(true, Ordering::Relaxed);
-        }
-
-        pub fn hide(&self) {
-            self.visible.store(false, Ordering::Relaxed);
+        pub fn set_state(&self, s: u8) {
+            self.state.store(s, Ordering::Relaxed);
         }
     }
 
@@ -90,8 +104,8 @@ mod win {
 
     unsafe fn create_window() -> HWND {
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
-        let x = screen_w - WIDTH - 16;
-        let y = 8;
+        let x = screen_w - WIDTH - 20;
+        let y = 12;
 
         CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
@@ -118,38 +132,53 @@ mod win {
     ) -> LRESULT {
         match msg {
             WM_CREATE => {
-                let _ = SetLayeredWindowAttributes(hwnd, None, 220, LWA_ALPHA);
+                let _ = SetLayeredWindowAttributes(hwnd, None, 230, LWA_ALPHA);
                 LRESULT(0)
             }
             WM_PAINT => {
+                // Read current state from window user data
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const AtomicU8;
+                let cur_state = if !state_ptr.is_null() {
+                    (*state_ptr).load(Ordering::Relaxed)
+                } else {
+                    STATE_RECORDING
+                };
+
+                let (dot_color, text_color, label) = match cur_state {
+                    STATE_RECORDING => (0x00_46_46_FF, 0x00_60_60_FF, "Recording"),
+                    STATE_TRANSCRIBING => (0x00_40_B8_FF, 0x00_50_D0_FF, "Transcribing\u{2026}"),
+                    STATE_CLEANING => (0x00_E0_A0_20, 0x00_F0_C0_40, "Cleaning up\u{2026}"),
+                    _ => (0x00_46_46_FF, 0x00_60_60_FF, "Recording"),
+                };
+
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);
 
                 // Dark background
-                let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00_28_28_28));
+                let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00_22_22_22));
                 let _ = FillRect(hdc, &ps.rcPaint, bg);
 
-                // Red circle dot (no outline)
+                // Colored circle dot (no outline)
                 let null_pen = GetStockObject(NULL_PEN);
                 let old_pen = SelectObject(hdc, null_pen);
-                let dot_brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00_46_46_FF));
+                let dot_brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(dot_color));
                 let old_brush = SelectObject(hdc, dot_brush);
-                let _ = Ellipse(hdc, 10, 8, 24, 22);
+                let _ = Ellipse(hdc, 12, 10, 26, 24);
                 let _ = SelectObject(hdc, old_brush);
                 let _ = SelectObject(hdc, old_pen);
 
-                // "REC" text in red
+                // Status text
                 let _ = SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00_50_50_FF));
+                SetTextColor(hdc, windows::Win32::Foundation::COLORREF(text_color));
                 let font = CreateFontW(
-                    16, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, w!("Segoe UI"),
+                    17, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, 0, 0, w!("Segoe UI"),
                 );
                 let old_font = SelectObject(hdc, font);
-                let mut text_buf: Vec<u16> = "REC".encode_utf16().collect();
+                let mut text_buf: Vec<u16> = label.encode_utf16().collect();
                 let mut text_rect = windows::Win32::Foundation::RECT {
-                    left: 28,
-                    top: 7,
-                    right: WIDTH,
+                    left: 32,
+                    top: 0,
+                    right: WIDTH - 8,
                     bottom: HEIGHT,
                 };
                 windows::Win32::Graphics::Gdi::DrawTextW(
@@ -171,15 +200,25 @@ mod win {
 
 #[cfg(windows)]
 pub use win::Overlay;
+#[cfg(windows)]
+pub use win::{STATE_CLEANING, STATE_HIDDEN, STATE_RECORDING, STATE_TRANSCRIBING};
 
 #[cfg(not(windows))]
 pub struct Overlay;
+
+#[cfg(not(windows))]
+pub const STATE_HIDDEN: u8 = 0;
+#[cfg(not(windows))]
+pub const STATE_RECORDING: u8 = 1;
+#[cfg(not(windows))]
+pub const STATE_TRANSCRIBING: u8 = 2;
+#[cfg(not(windows))]
+pub const STATE_CLEANING: u8 = 3;
 
 #[cfg(not(windows))]
 impl Overlay {
     pub fn new() -> Option<Self> {
         Some(Self)
     }
-    pub fn show(&self) {}
-    pub fn hide(&self) {}
+    pub fn set_state(&self, _s: u8) {}
 }
