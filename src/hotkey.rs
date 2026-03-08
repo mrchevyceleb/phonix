@@ -38,9 +38,21 @@ pub fn start_polling(key_name: String, tx: Sender<HotkeyEvent>) {
         .spawn(move || {
             let vk = vk_for_name(&key_name);
             let mut held = false;
+            // Cooldown after RecordStop to ignore ghost keypresses caused by
+            // SetForegroundWindow / SendInput during paste (prevents double-fire).
+            let mut cooldown_until: Option<std::time::Instant> = None;
 
             loop {
                 let pressed = is_key_down(vk);
+
+                // Skip events during cooldown
+                if let Some(deadline) = cooldown_until {
+                    if std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        continue;
+                    }
+                    cooldown_until = None;
+                }
 
                 if pressed && !held {
                     held = true;
@@ -49,6 +61,10 @@ pub fn start_polling(key_name: String, tx: Sender<HotkeyEvent>) {
                 } else if !pressed && held {
                     held = false;
                     let _ = tx.send(HotkeyEvent::RecordStop);
+                    // 500ms cooldown: paste takes ~150ms focus + typing time.
+                    // Any ghost keypress from SetForegroundWindow happens within
+                    // the first ~100ms, so 500ms is safely beyond that.
+                    cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(500));
                 }
 
                 std::thread::sleep(std::time::Duration::from_millis(20));

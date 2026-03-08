@@ -55,8 +55,8 @@ fn wrap_wav(pcm: &[i16]) -> Vec<u8> {
 pub fn play_start() {
     #[cfg(windows)]
     {
-        // Small silence pad so audio device initializes before the tone hits
-        let mut pcm = silence_samples(20);
+        // Silence pad so audio device initializes before the tone hits
+        let mut pcm = silence_samples(80);
         pcm.extend_from_slice(&tone_samples(660.0, 60));  // E5
         pcm.extend_from_slice(&tone_samples(880.0, 60));  // A5
         play_wav_async(wrap_wav(&pcm));
