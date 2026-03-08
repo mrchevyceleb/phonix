@@ -135,7 +135,7 @@ impl Default for Config {
         Self {
             record_key: "RightAlt".to_string(),
             auto_paste: true,
-            sound_enabled: false,
+            sound_enabled: true,
 
             whisper_provider: WhisperProvider::Groq,
             whisper_url_override: String::new(),
