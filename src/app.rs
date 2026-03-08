@@ -37,6 +37,7 @@ pub enum AppEvent {
     Transcribed { text: String, raw: String, for_long_dictate: bool },
     StatusUpdate(String),
     Error(String),
+    UpdateAvailable { version: String, url: String, notes: String },
 }
 
 // ── Commands flowing FROM UI TO pipeline ─────────────────────────────────────
@@ -88,6 +89,10 @@ pub struct PhonixApp {
     // Request focus on the Long Dictate text area after clicking Start
     focus_long_dictate_text: bool,
 
+    // Update notification from GitHub releases
+    update_info: Option<(String, String, String)>,
+    update_dismissed: bool,
+
     // True when user explicitly clicked Quit in tray menu; bypasses close-to-tray
     force_quit: bool,
 }
@@ -132,6 +137,8 @@ impl PhonixApp {
             startup_record_key,
             force_quit: false,
             focus_long_dictate_text: false,
+            update_info: None,
+            update_dismissed: false,
         }
     }
 
@@ -278,6 +285,9 @@ impl eframe::App for PhonixApp {
                     }
                     self.status = format!("Error: {e}");
                 }
+                AppEvent::UpdateAvailable { version, url, notes } => {
+                    self.update_info = Some((version, url, notes));
+                }
             }
         }
 
@@ -339,6 +349,7 @@ impl eframe::App for PhonixApp {
                     .inner_margin(egui::Margin::symmetric(16.0, 12.0)),
             )
             .show(ctx, |ui| {
+                self.render_update_banner(ui);
                 self.render_header(ui);
                 ui.add_space(8.0);
                 self.render_tabs(ui);
@@ -355,6 +366,64 @@ impl eframe::App for PhonixApp {
 
 impl PhonixApp {
     // â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    fn render_update_banner(&mut self, ui: &mut egui::Ui) {
+        if self.update_dismissed {
+            return;
+        }
+        let (version, url) = match &self.update_info {
+            Some((v, u, _)) => (v.clone(), u.clone()),
+            None => return,
+        };
+
+        egui::Frame::none()
+            .fill(Color32::from_rgb(25, 35, 55))
+            .rounding(egui::Rounding::same(8.0))
+            .stroke(egui::Stroke::new(1.0, Theme::ACCENT))
+            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Update available: v{}", version))
+                            .size(13.0)
+                            .color(Theme::ACCENT),
+                    );
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Dismiss")
+                                        .size(11.5)
+                                        .color(Theme::TEXT_SECONDARY),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .rounding(egui::Rounding::same(4.0)),
+                            )
+                            .clicked()
+                        {
+                            self.update_dismissed = true;
+                        }
+
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Download")
+                                        .size(12.0)
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(Theme::ACCENT)
+                                .rounding(egui::Rounding::same(4.0)),
+                            )
+                            .clicked()
+                        {
+                            crate::update::open_in_browser(&url);
+                        }
+                    });
+                });
+            });
+        ui.add_space(6.0);
+    }
 
     fn render_header(&mut self, ui: &mut egui::Ui) {
         let header_bg = if self.is_recording {

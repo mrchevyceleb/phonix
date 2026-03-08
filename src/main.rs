@@ -11,6 +11,7 @@ mod paste;
 mod server;
 mod sound;
 mod store;
+mod update;
 mod whisper;
 
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,9 @@ fn main() -> eframe::Result<()> {
     let (event_tx, event_rx) = bounded::<AppEvent>(32);
     let (cmd_tx, cmd_rx) = bounded::<PipelineCmd>(8);
     let (hotkey_tx, hotkey_rx) = bounded::<hotkey::HotkeyEvent>(8);
+
+    // ── Check for updates ───────────────────────────────────────────────────────
+    update::check_for_updates(event_tx.clone());
 
     // ── Local Whisper server (auto-start when provider = Local) ───────────────
     // Keep _whisper_server alive until the app exits — Drop kills the process.

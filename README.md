@@ -4,6 +4,14 @@
 
 Phonix captures audio via your microphone, sends it to a Whisper-compatible API for transcription, optionally cleans up the text with an LLM, and pastes the result directly into whatever app has focus. Terminals, browsers, email, IDEs, Slack -- it works everywhere.
 
+## Download & Install
+
+**Installer:** Download `PhonixSetup-x.x.x.exe` from the [Releases](../../releases/latest) page. Includes Start Menu shortcut, optional desktop shortcut, and uninstaller.
+
+**Portable:** Download `phonix.exe` from the same page if you prefer a standalone binary with no installation.
+
+Phonix checks for updates automatically on launch and shows a notification banner if a newer version is available.
+
 ## Features
 
 - **Push-to-talk dictation** -- hold a configurable hotkey, speak, release. Text is typed into the active window automatically.
@@ -11,19 +19,16 @@ Phonix captures audio via your microphone, sends it to a Whisper-compatible API 
 - **Pre-roll buffer** -- the microphone stays open with a rolling 0.8-second buffer so your first syllable is never clipped.
 - **LLM cleanup** -- optionally run transcriptions through a local or cloud LLM to remove filler words, fix grammar, and clean up punctuation.
 - **Multiple Whisper providers** -- Groq (free, fast), OpenAI, or a local whisper.cpp / faster-whisper server.
-- **Long Dictate mode** -- accumulate multiple recordings into a single block of text instead of auto-pasting each one.
+- **Long Dictate mode** -- click Start/Stop to record hands-free. Multiple recordings accumulate into a single text block. Copy when done.
 - **History panel** -- every transcription is saved. Copy any entry with one click.
 - **System tray** -- runs quietly in the background. Click the tray icon to open the UI.
 - **Native overlay** -- a small always-on-top pill shows recording/transcribing/cleaning status near the top-right corner of your screen.
+- **Auto-update** -- checks GitHub for new releases on startup and prompts you to download.
 - **Dark theme UI** -- clean, modern interface built with egui.
-
-## Download
-
-Grab the latest `phonix.exe` from the [Releases](../../releases) page. No installer needed -- just run the exe.
 
 ## Quick Start
 
-1. Download and run `phonix.exe`
+1. Download and run the installer (or portable exe)
 2. Open Settings and paste your **Groq API key** (free at [groq.com](https://groq.com))
 3. Hold **Right Alt**, speak, release
 4. Text appears in whatever window was active
@@ -41,7 +46,7 @@ All settings are in the UI (Settings tab) and saved to:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Record key | `RightAlt` | Hold to record. Options: `RightAlt`, `LeftAlt`, `RightControl`, `LeftControl`, `CapsLock`, `ScrollLock`, `F13`--`F16` |
+| Record key | `RightAlt` | Hold to record. Options: `RightAlt`, `LeftAlt`, `RightCtrl`, `LeftCtrl`, `RightShift`, `LeftShift`, `CapsLock`, `ScrollLock`, `F13`--`F16` |
 | Auto-paste | `true` | Type text into the active window after transcription |
 | Sound effect | `true` | Play a tone on record start/stop |
 | Close to tray | `true` | Hide to system tray instead of quitting when the window is closed |
@@ -92,6 +97,16 @@ python server.py
 
 Set the Whisper provider to "Local" in Settings. Dependencies are auto-installed on first launch if you select the Local provider from the app.
 
+### Building the Installer
+
+Requires [Inno Setup 6](https://jrsoftware.org/isinfo.php). After building the release binary:
+
+```bash
+iscc installer/phonix.iss
+```
+
+The installer is output to `target/installer/`.
+
 ## Architecture
 
 Multi-threaded event-driven design:
@@ -118,6 +133,7 @@ Threads communicate via bounded crossbeam channels. The pipeline never blocks th
 - **crossbeam-channel** for inter-thread communication
 - **windows crate** for native Windows APIs (hotkeys, SendInput, GDI overlay)
 - **serde + TOML** for configuration
+- **Inno Setup** for Windows installer
 
 ## Platform Support
 
