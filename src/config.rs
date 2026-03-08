@@ -3,6 +3,10 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WhisperProvider {
     Groq,
@@ -101,6 +105,10 @@ pub struct Config {
     #[serde(default)]
     pub sound_enabled: bool,
 
+    /// Hide to system tray instead of quitting when the window is closed
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
+
     // ── Whisper (speech → text) ───────────────────────────────────────────────
     pub whisper_provider: WhisperProvider,
     /// Override URL — leave blank to use the provider default
@@ -136,6 +144,7 @@ impl Default for Config {
             record_key: "RightAlt".to_string(),
             auto_paste: true,
             sound_enabled: true,
+            close_to_tray: true,
 
             whisper_provider: WhisperProvider::Groq,
             whisper_url_override: String::new(),

@@ -65,7 +65,7 @@ fn main() -> eframe::Result<()> {
                 match recorder.open() {
                     Ok(sr) => sample_rate = sr,
                     Err(e) => {
-                        let _ = event_tx.send(AppEvent::Error(format!("Mic error: {e}")));
+                        let _ = event_tx.try_send(AppEvent::Error(format!("Mic error: {e}")));
                     }
                 }
 
@@ -80,12 +80,12 @@ fn main() -> eframe::Result<()> {
                                 // Capture long-dictate state NOW so it's correct even
                                 // if the user toggles Stop before transcription finishes
                                 long_dictate_at_start = flags.lock().unwrap().long_dictate_active;
-                                let _ = event_tx.send(AppEvent::RecordingStarted);
+                                let _ = event_tx.try_send(AppEvent::RecordingStarted);
                             }
                             hotkey::HotkeyEvent::RecordStop if recording => {
                                 recording = false;
                                 let samples = recorder.stop();
-                                let _ = event_tx.send(AppEvent::RecordingStopped);
+                                let _ = event_tx.try_send(AppEvent::RecordingStopped);
 
                                 // Spawn async task for transcribe + cleanup + paste
                                 // Always reload from disk so settings changes take effect immediately
@@ -101,37 +101,37 @@ fn main() -> eframe::Result<()> {
                                     // (subtract pre-roll since that's ambient noise, not speech)
                                     let speech_samples = samples.len().saturating_sub(prl);
                                     if speech_samples < (sample_rate / 2) as usize {
-                                        let _ = tx.send(AppEvent::StatusUpdate(
+                                        let _ = tx.try_send(AppEvent::StatusUpdate(
                                             "Too short — try again".into(),
                                         ));
                                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                        let _ = tx.send(AppEvent::StatusUpdate(
+                                        let _ = tx.try_send(AppEvent::StatusUpdate(
                                             "Ready — hold key to dictate".into(),
                                         ));
                                         return;
                                     }
 
-                                    let _ = tx.send(AppEvent::StatusUpdate("Transcribing…".into()));
+                                    let _ = tx.try_send(AppEvent::StatusUpdate("Transcribing…".into()));
 
                                     let raw = match whisper::transcribe(samples, sample_rate, &cfg).await {
                                         Ok(r) => r,
                                         Err(e) => {
-                                            let _ = tx.send(AppEvent::Error(e.to_string()));
+                                            let _ = tx.try_send(AppEvent::Error(e.to_string()));
                                             return;
                                         }
                                     };
 
                                     if raw.is_empty() {
-                                        let _ = tx.send(AppEvent::StatusUpdate("No speech detected".into()));
+                                        let _ = tx.try_send(AppEvent::StatusUpdate("No speech detected".into()));
                                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                        let _ = tx.send(AppEvent::StatusUpdate(
+                                        let _ = tx.try_send(AppEvent::StatusUpdate(
                                             "Ready — hold key to dictate".into(),
                                         ));
                                         return;
                                     }
 
                                     let text = if cfg.cleanup_enabled {
-                                        let _ = tx.send(AppEvent::StatusUpdate("Cleaning up…".into()));
+                                        let _ = tx.try_send(AppEvent::StatusUpdate("Cleaning up…".into()));
                                         cleanup::cleanup(&raw, &cfg).await
                                     } else {
                                         raw.clone()
@@ -149,7 +149,7 @@ fn main() -> eframe::Result<()> {
                                         }
                                     }
 
-                                    let _ = tx.send(AppEvent::Transcribed { text, raw, for_long_dictate: for_ld });
+                                    let _ = tx.try_send(AppEvent::Transcribed { text, raw, for_long_dictate: for_ld });
                                 });
                             }
                             _ => {}
@@ -213,14 +213,14 @@ fn maybe_start_local_server(
     let server_py = match server::find_server_py() {
         Some(p) => p,
         None => {
-            let _ = event_tx.send(AppEvent::Error(
+            let _ = event_tx.try_send(AppEvent::Error(
                 "whisper-server/server.py not found next to phonix.exe".into(),
             ));
             return None;
         }
     };
 
-    let _ = event_tx.send(AppEvent::StatusUpdate(
+    let _ = event_tx.try_send(AppEvent::StatusUpdate(
         "Starting local Whisper server…".into(),
     ));
 
@@ -229,7 +229,7 @@ fn maybe_start_local_server(
 
     let mut srv = server::WhisperServer::new();
     if let Err(e) = srv.start(&server_py) {
-        let _ = event_tx.send(AppEvent::Error(e));
+        let _ = event_tx.try_send(AppEvent::Error(e));
         return None;
     }
 
@@ -239,10 +239,10 @@ fn maybe_start_local_server(
     std::thread::spawn(move || {
         match srv_ref.wait_until_ready(std::time::Duration::from_secs(60)) {
             Ok(_) => {
-                let _ = tx.send(AppEvent::StatusUpdate("Ready — hold key to dictate".into()));
+                let _ = tx.try_send(AppEvent::StatusUpdate("Ready — hold key to dictate".into()));
             }
             Err(e) => {
-                let _ = tx.send(AppEvent::Error(e));
+                let _ = tx.try_send(AppEvent::Error(e));
             }
         }
     });

@@ -57,10 +57,10 @@ pub fn start_polling(key_name: String, tx: Sender<HotkeyEvent>) {
                 if pressed && !held {
                     held = true;
                     let hwnd = get_foreground_window();
-                    let _ = tx.send(HotkeyEvent::RecordStart { target_hwnd: hwnd });
+                    let _ = tx.try_send(HotkeyEvent::RecordStart { target_hwnd: hwnd });
                 } else if !pressed && held {
                     held = false;
-                    let _ = tx.send(HotkeyEvent::RecordStop);
+                    let _ = tx.try_send(HotkeyEvent::RecordStop);
                     // 500ms cooldown: paste takes ~150ms focus + typing time.
                     // Any ghost keypress from SetForegroundWindow happens within
                     // the first ~100ms, so 500ms is safely beyond that.

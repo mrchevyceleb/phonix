@@ -264,8 +264,8 @@ impl eframe::App for PhonixApp {
             }
         }
 
-        // Intercept window close → hide to tray instead
-        if ctx.input(|i| i.viewport().close_requested()) {
+        // Intercept window close → hide to tray instead (if enabled)
+        if ctx.input(|i| i.viewport().close_requested()) && self.config.close_to_tray {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
@@ -485,15 +485,45 @@ impl PhonixApp {
                                     Layout::right_to_left(Align::Center),
                                     |ui| {
                                         // Delete button
-                                        let del_btn = egui::Button::new(
-                                            RichText::new("✕")
-                                                .size(12.0)
-                                                .color(Color32::from_rgb(100, 100, 120)),
-                                        )
-                                        .fill(Color32::TRANSPARENT)
-                                        .stroke(egui::Stroke::NONE);
-                                        if ui
-                                            .add(del_btn)
+                                        let del_resp = ui.allocate_ui(Vec2::new(24.0, 24.0), |ui| {
+                                            let (rect, resp) = ui.allocate_exact_size(
+                                                Vec2::splat(20.0),
+                                                egui::Sense::click(),
+                                            );
+                                            let hovered = resp.hovered();
+                                            let color = if hovered {
+                                                Theme::DANGER
+                                            } else {
+                                                Theme::TEXT_MUTED
+                                            };
+                                            if hovered {
+                                                ui.painter().rect_filled(
+                                                    rect,
+                                                    egui::Rounding::same(4.0),
+                                                    Color32::from_rgba_premultiplied(255, 80, 80, 20),
+                                                );
+                                            }
+                                            // Trash can icon (bin outline)
+                                            let c = rect.center();
+                                            let p = ui.painter();
+                                            let s = egui::Stroke::new(1.4, color);
+                                            // Lid
+                                            p.line_segment([c + egui::vec2(-5.0, -4.0), c + egui::vec2(5.0, -4.0)], s);
+                                            // Handle
+                                            p.line_segment([c + egui::vec2(-2.0, -6.0), c + egui::vec2(2.0, -6.0)], s);
+                                            p.line_segment([c + egui::vec2(-2.0, -6.0), c + egui::vec2(-2.0, -4.0)], s);
+                                            p.line_segment([c + egui::vec2(2.0, -6.0), c + egui::vec2(2.0, -4.0)], s);
+                                            // Body
+                                            p.line_segment([c + egui::vec2(-4.0, -3.0), c + egui::vec2(-3.0, 6.0)], s);
+                                            p.line_segment([c + egui::vec2(4.0, -3.0), c + egui::vec2(3.0, 6.0)], s);
+                                            p.line_segment([c + egui::vec2(-3.0, 6.0), c + egui::vec2(3.0, 6.0)], s);
+                                            // Inner lines
+                                            let thin = egui::Stroke::new(1.0, color);
+                                            p.line_segment([c + egui::vec2(-1.0, -2.0), c + egui::vec2(-1.0, 4.5)], thin);
+                                            p.line_segment([c + egui::vec2(1.0, -2.0), c + egui::vec2(1.0, 4.5)], thin);
+                                            resp
+                                        });
+                                        if del_resp.inner
                                             .on_hover_text("Delete")
                                             .clicked()
                                         {
@@ -711,6 +741,16 @@ impl PhonixApp {
                             ui.checkbox(
                                 &mut self.config.sound_enabled,
                                 "Beep on record start / stop",
+                            );
+                            ui.end_row();
+
+                            ui.label(
+                                RichText::new("Close to tray")
+                                    .color(Theme::TEXT_SECONDARY),
+                            );
+                            ui.checkbox(
+                                &mut self.config.close_to_tray,
+                                "Hide to system tray instead of quitting",
                             );
                             ui.end_row();
                         });
