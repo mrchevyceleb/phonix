@@ -6,8 +6,10 @@ mod audio;
 mod cleanup;
 mod config;
 mod hotkey;
+mod overlay;
 mod paste;
 mod server;
+mod sound;
 mod store;
 mod whisper;
 
@@ -155,9 +157,11 @@ fn main() -> eframe::Result<()> {
             .expect("failed to spawn pipeline thread");
     }
 
+    // ── Recording overlay (native always-on-top window) ─────────────────────
+    let rec_overlay = overlay::Overlay::new();
+
     // ── System tray ───────────────────────────────────────────────────────────
-    // Keep _tray alive for the duration of the program
-    let _tray = build_tray();
+    let tray = build_tray();
 
     // ── egui window ───────────────────────────────────────────────────────────
     let store_for_app = Arc::clone(&store);
@@ -182,6 +186,8 @@ fn main() -> eframe::Result<()> {
                 flags_for_app,
                 event_rx,
                 cmd_tx,
+                tray,
+                rec_overlay,
             )))
         }),
     )
@@ -253,14 +259,14 @@ fn build_tray() -> Option<tray_icon::TrayIcon> {
 
     TrayIconBuilder::new()
         .with_tooltip("Phonix — voice dictation")
-        .with_icon(make_tray_icon())
+        .with_icon(make_tray_icon_rgb(100, 180, 255))
         .with_menu(Box::new(menu))
         .build()
         .ok()
 }
 
-/// Generate a simple 32x32 RGBA microphone-colored dot as the tray icon.
-fn make_tray_icon() -> tray_icon::Icon {
+/// Generate a simple 32x32 RGBA colored dot as the tray icon.
+pub fn make_tray_icon_rgb(r: u8, g: u8, b: u8) -> tray_icon::Icon {
     let size = 32u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     for y in 0..size {
@@ -270,10 +276,10 @@ fn make_tray_icon() -> tray_icon::Icon {
             let dist = (cx * cx + cy * cy).sqrt();
             let i = ((y * size + x) * 4) as usize;
             if dist < 13.0 {
-                rgba[i] = 100;     // R
-                rgba[i + 1] = 180; // G
-                rgba[i + 2] = 255; // B
-                rgba[i + 3] = 255; // A
+                rgba[i] = r;
+                rgba[i + 1] = g;
+                rgba[i + 2] = b;
+                rgba[i + 3] = 255;
             }
         }
     }

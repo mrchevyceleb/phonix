@@ -57,6 +57,10 @@ pub struct Config {
     /// Automatically paste into the active window after transcription
     pub auto_paste: bool,
 
+    /// Play a short beep on record start/stop
+    #[serde(default)]
+    pub sound_enabled: bool,
+
     // ── Whisper (speech → text) ───────────────────────────────────────────────
     pub whisper_provider: WhisperProvider,
     /// Override URL — leave blank to use the provider default
@@ -77,6 +81,7 @@ impl Default for Config {
         Self {
             record_key: "RightAlt".to_string(),
             auto_paste: true,
+            sound_enabled: false,
 
             whisper_provider: WhisperProvider::Groq,
             whisper_url_override: String::new(),

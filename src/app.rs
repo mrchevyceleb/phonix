@@ -44,6 +44,12 @@ pub struct PhonixApp {
     // Channel to send ad-hoc commands (e.g. from settings save)
     #[allow(dead_code)]
     cmd_tx: Sender<()>,
+
+    // System tray (lives on the main thread)
+    tray: Option<tray_icon::TrayIcon>,
+
+    // Native always-on-top recording overlay
+    overlay: Option<crate::overlay::Overlay>,
 }
 
 #[derive(PartialEq)]
@@ -61,6 +67,8 @@ impl PhonixApp {
         flags: Arc<Mutex<SharedFlags>>,
         event_rx: crossbeam_channel::Receiver<AppEvent>,
         cmd_tx: Sender<()>,
+        tray: Option<tray_icon::TrayIcon>,
+        overlay: Option<crate::overlay::Overlay>,
     ) -> Self {
         // Dark theme
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
@@ -77,22 +85,42 @@ impl PhonixApp {
             settings_saved_flash: None,
             event_rx,
             cmd_tx,
+            tray,
+            overlay,
         }
     }
 }
 
 impl eframe::App for PhonixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Always repaint periodically so pipeline events (recording state,
+        // transcription results) are processed even when there's no user input.
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+
         // ── Poll events from pipeline ─────────────────────────────────────────
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 AppEvent::RecordingStarted => {
                     self.is_recording = true;
                     self.status = "Recording…".into();
+                    self.set_tray_recording(true);
+                    if let Some(ref ov) = self.overlay {
+                        ov.show();
+                    }
+                    if self.config.sound_enabled {
+                        crate::sound::play_start();
+                    }
                 }
                 AppEvent::RecordingStopped => {
                     self.is_recording = false;
                     self.status = "Transcribing…".into();
+                    self.set_tray_recording(false);
+                    if let Some(ref ov) = self.overlay {
+                        ov.hide();
+                    }
+                    if self.config.sound_enabled {
+                        crate::sound::play_stop();
+                    }
                 }
                 AppEvent::Transcribed { text, raw } => {
                     self.status = "Ready — hold key to dictate".into();
@@ -277,10 +305,11 @@ impl PhonixApp {
     // ── Long Dictate ──────────────────────────────────────────────────────────
 
     fn render_long_dictate(&mut self, ui: &mut egui::Ui) {
-        let mut flags = self.flags.lock().unwrap();
+        // Read the flag quickly, don't hold the lock during rendering
+        let is_active = self.flags.lock().unwrap().long_dictate_active;
 
         ui.horizontal(|ui| {
-            let (btn_text, btn_color) = if flags.long_dictate_active {
+            let (btn_text, btn_color) = if is_active {
                 ("⏹  Stop", Color32::from_rgb(255, 80, 80))
             } else {
                 ("🎙  Start", Color32::from_rgb(80, 180, 100))
@@ -288,14 +317,14 @@ impl PhonixApp {
 
             if ui
                 .add(egui::Button::new(RichText::new(btn_text).color(btn_color)))
-                .on_hover_text(if flags.long_dictate_active {
+                .on_hover_text(if is_active {
                     "Stop long dictate mode"
                 } else {
                     "Hold your record key to dictate — text accumulates here"
                 })
                 .clicked()
             {
-                flags.long_dictate_active = !flags.long_dictate_active;
+                self.flags.lock().unwrap().long_dictate_active = !is_active;
             }
 
             ui.separator();
@@ -310,7 +339,7 @@ impl PhonixApp {
                 self.long_dictate_text.clear();
             }
 
-            if flags.long_dictate_active {
+            if is_active {
                 ui.separator();
                 ui.colored_label(Color32::from_rgb(255, 100, 100), "● Live");
             }
@@ -351,6 +380,13 @@ impl PhonixApp {
                     ui.checkbox(
                         &mut self.config.auto_paste,
                         "Paste into active window on transcription",
+                    );
+                    ui.end_row();
+
+                    ui.label("Sound effect");
+                    ui.checkbox(
+                        &mut self.config.sound_enabled,
+                        "Beep on record start / stop",
                     );
                     ui.end_row();
                 });
@@ -495,6 +531,20 @@ impl PhonixApp {
             );
         });
     }
+
+    // ── Tray icon ─────────────────────────────────────────────────────────
+
+    fn set_tray_recording(&self, recording: bool) {
+        if let Some(ref tray) = self.tray {
+            let icon = if recording {
+                crate::make_tray_icon_rgb(255, 70, 70) // red
+            } else {
+                crate::make_tray_icon_rgb(100, 180, 255) // blue
+            };
+            let _ = tray.set_icon(Some(icon));
+        }
+    }
+
 }
 
 fn truncate(s: &str, max: usize) -> String {

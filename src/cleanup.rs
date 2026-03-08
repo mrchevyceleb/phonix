@@ -16,7 +16,7 @@ Rules:
 - Fix obvious transcription errors
 - Preserve the speaker's natural voice — do not rephrase, summarize, or add anything not said
 - If the input is a question, keep it a question
-- Output ONLY the cleaned text. No explanation, no quotes, no preamble.";
+- Output ONLY the cleaned text. No explanation, no quotes, no preamble, no reasoning, no <think> tags.";
 
 /// Send raw Whisper output to the LLM for Wispr-style cleanup.
 /// On failure, returns the raw text unmodified — never blocks the pipeline.
@@ -71,6 +71,22 @@ async fn call_lm(raw: &str, config: &Config) -> Result<String> {
     // Strip <think>...</think> blocks from reasoning models (DeepSeek, etc.)
     if let Some(end) = text.find("</think>") {
         text = text[end + 8..].trim().to_string();
+    } else if text.contains("<think>") {
+        // Truncated thinking (hit token limit) — discard, use raw
+        text = raw.to_string();
+    }
+
+    // Sanity check: cleanup should never make text significantly longer.
+    // If the output is >3x the input length, the model is reasoning/explaining
+    // instead of cleaning. Fall back to raw.
+    if text.len() > raw.len() * 3 + 50 {
+        eprintln!("[phonix/cleanup] response too long ({}B vs {}B input), using raw", text.len(), raw.len());
+        text = raw.to_string();
+    }
+
+    // If the model returned nothing useful, fall back to raw
+    if text.is_empty() {
+        text = raw.to_string();
     }
 
     Ok(text)
