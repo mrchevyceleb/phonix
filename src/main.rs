@@ -178,8 +178,8 @@ fn main() -> eframe::Result<()> {
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_title("Phonix")
-                .with_inner_size([460.0, 620.0])
-                .with_min_inner_size([360.0, 400.0])
+                .with_inner_size([500.0, 660.0])
+                .with_min_inner_size([380.0, 440.0])
                 .with_icon(load_icon()),
             ..Default::default()
         },
