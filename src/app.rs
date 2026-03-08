@@ -159,11 +159,12 @@ impl eframe::App for PhonixApp {
             }
         }
 
-        // ── Poll tray events ──────────────────────────────────────────────────
-        if let Ok(_event) = tray_icon::TrayIconEvent::receiver().try_recv() {
-            // Any click on tray icon → show + focus the window
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // ── Poll tray events (only handle clicks, ignore hover/move) ────────
+        while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+            if matches!(event, tray_icon::TrayIconEvent::Click { .. }) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
         }
 
         // Intercept window close → hide to tray instead
