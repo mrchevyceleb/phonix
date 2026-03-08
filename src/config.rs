@@ -190,23 +190,22 @@ impl Config {
         }
     }
 
-    /// Resolved cleanup API key.
-    /// Reuses the whisper API key when both providers are the same cloud service.
-    pub fn cleanup_key(&self) -> &str {
-        if !self.cleanup_api_key.is_empty() {
-            return &self.cleanup_api_key;
-        }
-        // Auto-share whisper key when providers match
-        let same_cloud = matches!(
+    /// Whether whisper and cleanup use the same cloud provider.
+    pub fn cleanup_shares_whisper_key(&self) -> bool {
+        matches!(
             (&self.cleanup_provider, &self.whisper_provider),
             (CleanupProvider::Groq, WhisperProvider::Groq)
                 | (CleanupProvider::OpenAI, WhisperProvider::OpenAI)
-        );
-        if same_cloud {
-            &self.whisper_api_key
-        } else {
-            &self.cleanup_api_key
+        )
+    }
+
+    /// Resolved cleanup API key.
+    /// Always reuses the whisper key when both are the same cloud provider.
+    pub fn cleanup_key(&self) -> &str {
+        if self.cleanup_shares_whisper_key() {
+            return &self.whisper_api_key;
         }
+        &self.cleanup_api_key
     }
 
     fn path() -> Option<PathBuf> {

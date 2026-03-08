@@ -524,18 +524,11 @@ impl PhonixApp {
                     });
                     ui.end_row();
 
-                    // Show whether key is shared from whisper
-                    let key_shared = self.config.cleanup_api_key.is_empty()
-                        && matches!(
-                            (&self.config.cleanup_provider, &self.config.whisper_provider),
-                            (CleanupProvider::Groq, crate::config::WhisperProvider::Groq)
-                                | (CleanupProvider::OpenAI, crate::config::WhisperProvider::OpenAI)
-                        );
-
-                    if key_shared {
+                    // Only show a separate API key field when providers differ
+                    if self.config.cleanup_shares_whisper_key() {
                         ui.label("API Key");
                         ui.label(
-                            RichText::new("Using Whisper API key")
+                            RichText::new("Using Whisper API key above")
                                 .small()
                                 .color(Color32::from_rgb(80, 200, 100)),
                         );
@@ -545,7 +538,7 @@ impl PhonixApp {
                         ui.add(
                             TextEdit::singleline(&mut self.config.cleanup_api_key)
                                 .password(true)
-                                .hint_text("leave blank to use Whisper key"),
+                                .hint_text("paste API key for this provider"),
                         );
                         ui.end_row();
                     }
