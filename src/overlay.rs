@@ -346,8 +346,9 @@ mod mac {
     // ── GCD helpers ──────────────────────────────────────────────────────────
 
     extern "C" {
-        fn dispatch_get_main_queue() -> id;
-        fn dispatch_async_f(queue: id, context: *mut c_void, work: extern "C" fn(*mut c_void));
+        // dispatch_get_main_queue() is a C macro expanding to &_dispatch_main_q
+        static _dispatch_main_q: u8;
+        fn dispatch_async_f(queue: *const u8, context: *mut c_void, work: extern "C" fn(*mut c_void));
     }
 
     /// Dispatch a closure to the main thread via GCD. All AppKit operations
@@ -358,7 +359,8 @@ mod mac {
             unsafe { Box::from_raw(ctx as *mut F)() }
         }
         let ctx = Box::into_raw(Box::new(f)) as *mut c_void;
-        dispatch_async_f(dispatch_get_main_queue(), ctx, trampoline::<F>);
+        let main_queue = &_dispatch_main_q as *const u8;
+        dispatch_async_f(main_queue, ctx, trampoline::<F>);
     }
 
     // ── Overlay ──────────────────────────────────────────────────────────────
