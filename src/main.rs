@@ -72,8 +72,6 @@ fn main() -> eframe::Result<()> {
         let event_tx = event_tx.clone();
         let cmd_rx = cmd_rx;
         let pipeline_overlay = Arc::clone(&shared_overlay);
-        let sound_enabled = config.sound_enabled;
-
         std::thread::Builder::new()
             .name("phonix-pipeline".into())
             .spawn(move || {
@@ -203,14 +201,14 @@ fn main() -> eframe::Result<()> {
                                 pre_roll_len = recorder.start();
                                 long_dictate_at_start = flags.lock().unwrap().long_dictate_active;
                                 set_overlay(overlay::STATE_RECORDING);
-                                if sound_enabled { sound::play_start(); }
+                                sound::play_start_with_preset(&Config::load().sound_preset);
                                 let _ = event_tx.try_send(AppEvent::RecordingStarted);
                             }
                             hotkey::HotkeyEvent::RecordStop if recording => {
                                 recording = false;
                                 let samples = recorder.stop();
                                 set_overlay(overlay::STATE_TRANSCRIBING);
-                                if sound_enabled { sound::play_stop(); }
+                                sound::play_stop_with_preset(&Config::load().sound_preset);
                                 let _ = event_tx.try_send(AppEvent::RecordingStopped);
                                 spawn_transcription(
                                     &rt, samples, sample_rate, pre_roll_len,
@@ -231,14 +229,14 @@ fn main() -> eframe::Result<()> {
                                 pre_roll_len = recorder.start();
                                 long_dictate_at_start = true;
                                 set_overlay(overlay::STATE_RECORDING);
-                                if sound_enabled { sound::play_start(); }
+                                sound::play_start_with_preset(&Config::load().sound_preset);
                                 let _ = event_tx.try_send(AppEvent::RecordingStarted);
                             }
                             PipelineCmd::StopRecording if recording => {
                                 recording = false;
                                 let samples = recorder.stop();
                                 set_overlay(overlay::STATE_TRANSCRIBING);
-                                if sound_enabled { sound::play_stop(); }
+                                sound::play_stop_with_preset(&Config::load().sound_preset);
                                 let _ = event_tx.try_send(AppEvent::RecordingStopped);
                                 spawn_transcription(
                                     &rt, samples, sample_rate, pre_roll_len,
@@ -264,6 +262,7 @@ fn main() -> eframe::Result<()> {
     let flags_for_app = Arc::clone(&flags);
     let config_for_app = config.clone();
     let overlay_for_app = Arc::clone(&shared_overlay);
+    let event_tx_for_app = event_tx.clone();
 
     eframe::run_native(
         "Phonix",
@@ -282,6 +281,7 @@ fn main() -> eframe::Result<()> {
                 config_for_app,
                 flags_for_app,
                 event_rx,
+                event_tx_for_app,
                 cmd_tx,
                 tray,
                 tray_menu_ids,
@@ -321,7 +321,8 @@ fn maybe_start_local_server(
     server::WhisperServer::kill_stale();
 
     let mut srv = server::WhisperServer::new();
-    if let Err(e) = srv.start(&server_py) {
+    let model_arg = config.local_model_size.arg();
+    if let Err(e) = srv.start(&server_py, Some(model_arg)) {
         let _ = event_tx.try_send(AppEvent::Error(e));
         return None;
     }

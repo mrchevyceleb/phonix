@@ -49,7 +49,7 @@ from flask import Flask, request, Response
 # ── Args ──────────────────────────────────────────────────────────────────────
 
 parser = argparse.ArgumentParser(description="Phonix local Whisper server")
-parser.add_argument("--model",  default="medium",
+parser.add_argument("--model",  default="small",
                     choices=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
                     help="Whisper model size (default: medium)")
 parser.add_argument("--cpu",    action="store_true",
@@ -63,12 +63,40 @@ compute = "int8" if args.cpu else "float16"
 
 # ── Load model ────────────────────────────────────────────────────────────────
 
-print(f"[whisper-server] Loading {args.model} on {device}...")
-try:
-    model = WhisperModel(args.model, device=device, compute_type=compute)
-except Exception as e:
-    print(f"[whisper-server] GPU load failed ({e}), retrying on CPU...")
-    model = WhisperModel(args.model, device="cpu", compute_type="int8")
+def load_model(model_name, device, compute_type):
+    """Try to load a Whisper model with progressive fallbacks."""
+    # 1. Try requested device
+    print(f"[whisper-server] Loading {model_name} on {device} ({compute_type})...")
+    try:
+        return WhisperModel(model_name, device=device, compute_type=compute_type)
+    except Exception as e:
+        print(f"[whisper-server] Failed on {device}: {e}")
+
+    # 2. Try CPU if we weren't already
+    if device != "cpu":
+        print(f"[whisper-server] Retrying {model_name} on CPU...")
+        try:
+            return WhisperModel(model_name, device="cpu", compute_type="int8")
+        except Exception as e:
+            print(f"[whisper-server] CPU load failed: {e}")
+
+    # 3. Try progressively smaller models as last resort
+    all_sizes = ["medium", "small", "base", "tiny"]
+    try_from = all_sizes.index(model_name) + 1 if model_name in all_sizes else 0
+    for fallback in all_sizes[try_from:]:
+        print(f"[whisper-server] Trying smaller model: {fallback} on CPU...")
+        try:
+            return WhisperModel(fallback, device="cpu", compute_type="int8")
+        except Exception as e:
+            print(f"[whisper-server] {fallback} failed: {e}")
+
+    return None
+
+model = load_model(args.model, device, compute)
+if model is None:
+    print("[whisper-server] FATAL: Could not load any Whisper model.")
+    print("[whisper-server] Try: pip install --force-reinstall faster-whisper ctranslate2")
+    sys.exit(1)
 
 print(f"[whisper-server] Ready — http://localhost:{args.port}")
 

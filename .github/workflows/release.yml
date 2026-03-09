@@ -88,6 +88,10 @@ jobs:
           # Generate Info.plist with correct version
           sed "s/1.0.0/$VERSION/g" macos/Info.plist > Phonix.app/Contents/Info.plist
 
+      - name: Ad-hoc codesign
+        run: |
+          codesign --force --deep -s - Phonix.app
+
       - name: Create DMG
         run: |
           hdiutil create -volname "Phonix" -srcfolder Phonix.app -ov -format UDZO "Phonix-${GITHUB_REF_NAME#v}-macos.dmg"

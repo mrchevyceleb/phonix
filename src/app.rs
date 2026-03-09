@@ -7,7 +7,8 @@ use egui::{Align, Color32, Layout, RichText, ScrollArea, TextEdit, Vec2};
 
 use crate::store::{Entry, Store};
 use crate::config::Config;
-use crate::hotkey::{SUPPORTED_KEYS, KEY_GROUPS};
+use crate::config::{SoundPreset, LocalModelSize};
+use crate::hotkey;
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
 
@@ -38,7 +39,9 @@ pub enum AppEvent {
     Transcribed { text: String, raw: String, for_long_dictate: bool },
     StatusUpdate(String),
     Error(String),
-    UpdateAvailable { version: String, url: String },
+    UpdateAvailable { version: String, url: String, download_url: String },
+    UpdateDownloaded { installer_path: String },
+    UpdateFailed(String),
 }
 
 // -- Commands flowing FROM UI TO pipeline -------------------------------------
@@ -72,6 +75,8 @@ pub struct PhonixApp {
 
     // Channel to receive events from the pipeline
     event_rx: crossbeam_channel::Receiver<AppEvent>,
+    // Sender clone so UI can trigger background tasks (e.g. update downloads)
+    event_tx: crossbeam_channel::Sender<AppEvent>,
     // Channel to send commands to the pipeline (e.g. Start/Stop from Long Dictate)
     cmd_tx: Sender<PipelineCmd>,
 
@@ -87,9 +92,15 @@ pub struct PhonixApp {
     // Request focus on the Long Dictate text area after clicking Start
     focus_long_dictate_text: bool,
 
-    // Update notification from GitHub releases: (version, url)
-    update_info: Option<(String, String)>,
+    // True when listening for a key press in Settings
+    listening_for_key: bool,
+
+    // Update notification from GitHub releases: (version, url, download_url)
+    update_info: Option<(String, String, String)>,
     update_dismissed: bool,
+    update_downloading: bool,
+    update_installer_path: Option<String>,
+    update_error: Option<String>,
 
     // True when user explicitly clicked Quit in tray menu; bypasses close-to-tray
     force_quit: bool,
@@ -112,6 +123,7 @@ impl PhonixApp {
         config: Config,
         flags: Arc<Mutex<SharedFlags>>,
         event_rx: crossbeam_channel::Receiver<AppEvent>,
+        event_tx: crossbeam_channel::Sender<AppEvent>,
         cmd_tx: Sender<PipelineCmd>,
         tray: Option<tray_icon::TrayIcon>,
         tray_menu_ids: Option<crate::TrayMenuIds>,
@@ -177,14 +189,19 @@ impl PhonixApp {
             copy_flash: None,
             settings_saved_flash: None,
             event_rx,
+            event_tx,
             cmd_tx,
             tray,
             overlay,
             startup_record_key,
             force_quit: false,
             focus_long_dictate_text: false,
+            listening_for_key: false,
             update_info: None,
             update_dismissed: false,
+            update_downloading: false,
+            update_installer_path: None,
+            update_error: None,
             tray_open_requested,
         }
     }
@@ -281,9 +298,7 @@ impl eframe::App for PhonixApp {
                     if let Some(ref ov) = *self.overlay {
                         ov.set_state(crate::overlay::STATE_RECORDING);
                     }
-                    if self.config.sound_enabled {
-                        crate::sound::play_start();
-                    }
+                    crate::sound::play_start_with_preset(&self.config.sound_preset);
                 }
                 AppEvent::RecordingStopped => {
                     self.is_recording = false;
@@ -292,9 +307,7 @@ impl eframe::App for PhonixApp {
                     if let Some(ref ov) = *self.overlay {
                         ov.set_state(crate::overlay::STATE_TRANSCRIBING);
                     }
-                    if self.config.sound_enabled {
-                        crate::sound::play_stop();
-                    }
+                    crate::sound::play_stop_with_preset(&self.config.sound_preset);
                 }
                 AppEvent::Transcribed { text, raw, for_long_dictate } => {
                     self.status = "Ready - hold key to dictate".into();
@@ -328,8 +341,16 @@ impl eframe::App for PhonixApp {
                     }
                     self.status = format!("Error: {e}");
                 }
-                AppEvent::UpdateAvailable { version, url } => {
-                    self.update_info = Some((version, url));
+                AppEvent::UpdateAvailable { version, url, download_url } => {
+                    self.update_info = Some((version, url, download_url));
+                }
+                AppEvent::UpdateDownloaded { installer_path } => {
+                    self.update_downloading = false;
+                    self.update_installer_path = Some(installer_path);
+                }
+                AppEvent::UpdateFailed(e) => {
+                    self.update_downloading = false;
+                    self.update_error = Some(e);
                 }
             }
         }
@@ -400,8 +421,8 @@ impl PhonixApp {
         if self.update_dismissed {
             return;
         }
-        let (version, url) = match &self.update_info {
-            Some((v, u)) => (v.clone(), u.clone()),
+        let (version, release_url, download_url) = match &self.update_info {
+            Some((v, u, d)) => (v.clone(), u.clone(), d.clone()),
             None => return,
         };
 
@@ -411,16 +432,51 @@ impl PhonixApp {
             .stroke(egui::Stroke::new(1.0, Theme::ACCENT))
             .inner_margin(egui::Margin::symmetric(12.0, 8.0))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("Update available: v{}", version))
-                            .size(13.0)
-                            .color(Theme::ACCENT),
-                    );
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(
+                // Installer downloaded and ready to install
+                if let Some(ref path) = self.update_installer_path {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("v{} ready to install", version))
+                                .size(13.0)
+                                .color(Theme::SUCCESS),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let install_btn = egui::Button::new(
+                                RichText::new("Install & Restart")
+                                    .size(12.0)
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(Theme::SUCCESS)
+                            .rounding(egui::Rounding::same(4.0));
+                            if ui.add(install_btn).clicked() {
+                                crate::update::install_and_restart(path);
+                            }
+                        });
+                    });
+                }
+                // Download in progress
+                else if self.update_downloading {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("Downloading v{}...", version))
+                                .size(13.0)
+                                .color(Theme::ACCENT),
+                        );
+                        ui.spinner();
+                    });
+                    ui.ctx().request_repaint();
+                }
+                // Download failed
+                else if self.update_error.is_some() {
+                    let err_msg = self.update_error.clone().unwrap();
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("Update failed: {}", err_msg))
+                                .size(12.0)
+                                .color(Theme::DANGER),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(
                                 egui::Button::new(
                                     RichText::new("Dismiss")
                                         .size(11.5)
@@ -428,28 +484,92 @@ impl PhonixApp {
                                 )
                                 .fill(Color32::TRANSPARENT)
                                 .rounding(egui::Rounding::same(4.0)),
-                            )
-                            .clicked()
-                        {
-                            self.update_dismissed = true;
-                        }
-
-                        if ui
-                            .add(
+                            ).clicked() {
+                                self.update_dismissed = true;
+                            }
+                            if ui.add(
                                 egui::Button::new(
-                                    RichText::new("Download")
+                                    RichText::new("Retry")
                                         .size(12.0)
                                         .color(Color32::WHITE),
                                 )
                                 .fill(Theme::ACCENT)
                                 .rounding(egui::Rounding::same(4.0)),
-                            )
-                            .clicked()
-                        {
-                            crate::update::open_in_browser(&url);
-                        }
+                            ).clicked() {
+                                self.update_error = None;
+                                self.update_downloading = true;
+                                crate::update::download_update(
+                                    download_url.clone(),
+                                    self.event_tx.clone(),
+                                );
+                            }
+                        });
                     });
-                });
+                }
+                // Initial prompt: Update Now / Later
+                else {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("Update available: v{}", version))
+                                .size(13.0)
+                                .color(Theme::ACCENT),
+                        );
+
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Later")
+                                            .size(11.5)
+                                            .color(Theme::TEXT_SECONDARY),
+                                    )
+                                    .fill(Color32::TRANSPARENT)
+                                    .rounding(egui::Rounding::same(4.0)),
+                                )
+                                .clicked()
+                            {
+                                self.update_dismissed = true;
+                            }
+
+                            if !download_url.is_empty() {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Update Now")
+                                                .size(12.0)
+                                                .color(Color32::WHITE),
+                                        )
+                                        .fill(Theme::ACCENT)
+                                        .rounding(egui::Rounding::same(4.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.update_downloading = true;
+                                    crate::update::download_update(
+                                        download_url.clone(),
+                                        self.event_tx.clone(),
+                                    );
+                                }
+                            } else if !release_url.is_empty() {
+                                // No direct download URL found; link to release page
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("View Release")
+                                                .size(12.0)
+                                                .color(Color32::WHITE),
+                                        )
+                                        .fill(Theme::ACCENT)
+                                        .rounding(egui::Rounding::same(4.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    crate::update::open_in_browser(&release_url);
+                                }
+                            }
+                        });
+                    });
+                }
             });
         ui.add_space(6.0);
     }
@@ -870,7 +990,8 @@ impl PhonixApp {
                                     .color(Theme::TEXT_SECONDARY),
                             );
                             ui.vertical(|ui| {
-                                for &(group_label, start, end) in KEY_GROUPS {
+                                // Key group buttons
+                                for &(group_label, start, end) in hotkey::key_groups() {
                                     ui.horizontal(|ui| {
                                         ui.allocate_ui_with_layout(
                                             Vec2::new(55.0, 18.0),
@@ -883,7 +1004,7 @@ impl PhonixApp {
                                                 );
                                             },
                                         );
-                                        for &(config_name, display_label) in &SUPPORTED_KEYS[start..end] {
+                                        for &(config_name, display_label) in &hotkey::supported_keys()[start..end] {
                                             let selected = self.config.record_key == config_name;
                                             let text_color = if selected { Color32::WHITE } else { Theme::TEXT_SECONDARY };
                                             let btn = egui::Button::new(
@@ -898,9 +1019,44 @@ impl PhonixApp {
                                             .rounding(egui::Rounding::same(6.0));
                                             if ui.add(btn).clicked() {
                                                 self.config.record_key = config_name.to_string();
+                                                self.listening_for_key = false;
                                             }
                                         }
                                     });
+                                }
+
+                                // "Record key" press-any-key button
+                                ui.add_space(4.0);
+                                if self.listening_for_key {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("Press a key...")
+                                                .size(12.0)
+                                                .color(Theme::ACCENT)
+                                                .strong(),
+                                        );
+                                        if ui.small_button("Cancel").clicked() {
+                                            self.listening_for_key = false;
+                                        }
+                                    });
+                                    // Poll for key press
+                                    if let Some(key) = crate::hotkey::detect_pressed_key() {
+                                        self.config.record_key = key.to_string();
+                                        self.listening_for_key = false;
+                                    }
+                                    ui.ctx().request_repaint();
+                                } else {
+                                    let record_btn = egui::Button::new(
+                                        RichText::new("Record a key")
+                                            .size(11.0)
+                                            .color(Theme::TEXT_SECONDARY),
+                                    )
+                                    .fill(Color32::TRANSPARENT)
+                                    .stroke(egui::Stroke::new(0.5, Theme::BORDER_SUBTLE))
+                                    .rounding(egui::Rounding::same(6.0));
+                                    if ui.add(record_btn).clicked() {
+                                        self.listening_for_key = true;
+                                    }
                                 }
                             });
                             ui.end_row();
@@ -916,13 +1072,29 @@ impl PhonixApp {
                             ui.end_row();
 
                             ui.label(
-                                RichText::new("Sound effect")
+                                RichText::new("Sound")
                                     .color(Theme::TEXT_SECONDARY),
                             );
-                            ui.checkbox(
-                                &mut self.config.sound_enabled,
-                                "Beep on record start / stop",
-                            );
+                            ui.horizontal(|ui| {
+                                for preset in SoundPreset::all() {
+                                    let selected = self.config.sound_preset == *preset;
+                                    let text_color = if selected { Color32::WHITE } else { Theme::TEXT_SECONDARY };
+                                    let btn = egui::Button::new(
+                                        RichText::new(preset.label()).color(text_color).size(12.0),
+                                    )
+                                    .fill(if selected { Theme::ACCENT } else { Color32::TRANSPARENT })
+                                    .stroke(if selected {
+                                        egui::Stroke::new(1.0, Theme::ACCENT)
+                                    } else {
+                                        egui::Stroke::new(0.5, Theme::BORDER_SUBTLE)
+                                    })
+                                    .rounding(egui::Rounding::same(6.0));
+                                    if ui.add(btn).clicked() {
+                                        self.config.sound_preset = preset.clone();
+                                        crate::sound::play_preview(preset);
+                                    }
+                                }
+                            });
                             ui.end_row();
 
                             ui.label(
@@ -1008,6 +1180,34 @@ impl PhonixApp {
                                     .password(true)
                                     .hint_text("paste your API key here"),
                                 );
+                                ui.end_row();
+                            }
+
+                            // Model size selector (only for Local provider)
+                            if self.config.whisper_provider == crate::config::WhisperProvider::Local {
+                                ui.label(
+                                    RichText::new("Model size")
+                                        .color(Theme::TEXT_SECONDARY),
+                                );
+                                ui.horizontal(|ui| {
+                                    for size in LocalModelSize::all() {
+                                        let selected = self.config.local_model_size == *size;
+                                        let text_color = if selected { Color32::WHITE } else { Theme::TEXT_SECONDARY };
+                                        let btn = egui::Button::new(
+                                            RichText::new(size.label()).color(text_color).size(12.0),
+                                        )
+                                        .fill(if selected { Theme::ACCENT } else { Color32::TRANSPARENT })
+                                        .stroke(if selected {
+                                            egui::Stroke::new(1.0, Theme::ACCENT)
+                                        } else {
+                                            egui::Stroke::new(0.5, Theme::BORDER_SUBTLE)
+                                        })
+                                        .rounding(egui::Rounding::same(6.0));
+                                        if ui.add(btn).clicked() {
+                                            self.config.local_model_size = size.clone();
+                                        }
+                                    }
+                                });
                                 ui.end_row();
                             }
 

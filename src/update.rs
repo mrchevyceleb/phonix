@@ -44,14 +44,132 @@ async fn check_inner(event_tx: &Sender<AppEvent>) -> Result<(), Box<dyn std::err
 
     let url = resp["html_url"].as_str().unwrap_or_default();
 
+    // Find the platform-appropriate installer asset
+    let download_url = find_platform_asset(&resp).unwrap_or_default();
+
     if is_newer(remote_version, CURRENT_VERSION) {
         let _ = event_tx.try_send(AppEvent::UpdateAvailable {
             version: remote_version.to_string(),
             url: url.to_string(),
+            download_url,
         });
     }
 
     Ok(())
+}
+
+/// Find the download URL for the current platform's installer asset.
+fn find_platform_asset(release: &serde_json::Value) -> Option<String> {
+    let assets = release["assets"].as_array()?;
+
+    for asset in assets {
+        let name = asset["name"].as_str().unwrap_or_default().to_lowercase();
+        let url = asset["browser_download_url"].as_str().unwrap_or_default();
+
+        #[cfg(windows)]
+        {
+            // Prefer the installer (PhonixSetup-*.exe) over the portable exe
+            if name.starts_with("phonixsetup") && name.ends_with(".exe") {
+                return Some(url.to_string());
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if name.ends_with(".dmg") {
+                return Some(url.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Download the update installer in a background thread.
+/// Sends UpdateDownloaded or UpdateFailed when done.
+pub fn download_update(download_url: String, event_tx: Sender<AppEvent>) {
+    std::thread::Builder::new()
+        .name("phonix-update-download".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = event_tx.try_send(AppEvent::UpdateFailed(e.to_string()));
+                    return;
+                }
+            };
+            rt.block_on(async {
+                match download_inner(&download_url).await {
+                    Ok(path) => {
+                        let _ = event_tx.try_send(AppEvent::UpdateDownloaded {
+                            installer_path: path,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = event_tx.try_send(AppEvent::UpdateFailed(e.to_string()));
+                    }
+                }
+            });
+        })
+        .ok();
+}
+
+async fn download_inner(url: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()?;
+
+    let resp = client
+        .get(url)
+        .header("User-Agent", "phonix")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Download failed: HTTP {}", resp.status()).into());
+    }
+
+    // Determine filename from URL
+    let filename = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("phonix-update");
+
+    let temp_dir = std::env::temp_dir().join("phonix-update");
+    std::fs::create_dir_all(&temp_dir)?;
+    let dest = temp_dir.join(filename);
+
+    let bytes = resp.bytes().await?;
+    std::fs::write(&dest, &bytes)?;
+
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// Launch the downloaded installer and exit the current process.
+pub fn install_and_restart(installer_path: &str) {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        // Launch the Inno Setup installer; it handles closing the old process
+        let _ = Command::new(installer_path)
+            .arg("/SILENT")
+            .spawn();
+        // Give the installer a moment to start, then exit
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::process::exit(0);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        // Open the DMG (mounts and shows in Finder)
+        let _ = Command::new("open").arg(installer_path).spawn();
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = installer_path;
+    }
 }
 
 /// Returns true if `remote` is a higher semver than `local`.

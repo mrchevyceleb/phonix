@@ -9,13 +9,14 @@ pub enum HotkeyEvent {
 }
 
 /// All supported push-to-talk keys as `(config_name, display_label)`.
+/// Left variants come first in each group so the UI reads naturally.
 pub const SUPPORTED_KEYS: &[(&str, &str)] = &[
-    ("RightAlt", "Right Alt"),
     ("LeftAlt", "Left Alt"),
-    ("RightCtrl", "Right Ctrl"),
+    ("RightAlt", "Right Alt"),
     ("LeftCtrl", "Left Ctrl"),
-    ("RightShift", "Right Shift"),
+    ("RightCtrl", "Right Ctrl"),
     ("LeftShift", "Left Shift"),
+    ("RightShift", "Right Shift"),
     ("CapsLock", "Caps Lock"),
     ("ScrollLock", "Scroll Lock"),
     ("F13", "F13"),
@@ -85,6 +86,18 @@ fn vk_for_name(name: &str) -> i32 {
 fn vk_for_name(name: &str) -> i32 {
     eprintln!("[phonix/hotkey] unsupported platform, key '{}' ignored", name);
     0
+}
+
+/// Check which supported key is currently pressed. Returns the config name if any.
+/// Used by the Settings UI for "press any key" recording.
+pub fn detect_pressed_key() -> Option<&'static str> {
+    for &(config_name, _) in supported_keys() {
+        let vk = vk_for_name(config_name);
+        if is_key_down(vk) {
+            return Some(config_name);
+        }
+    }
+    None
 }
 
 /// Spawn a background thread that polls `GetAsyncKeyState` every 20ms.
@@ -213,12 +226,12 @@ pub fn supported_keys() -> &'static [(&'static str, &'static str)] {
     #[cfg(target_os = "macos")]
     {
         const MACOS_KEYS: &[(&str, &str)] = &[
-            ("RightAlt", "Right Option"),
             ("LeftAlt", "Left Option"),
-            ("RightCtrl", "Right Control"),
+            ("RightAlt", "Right Option"),
             ("LeftCtrl", "Left Control"),
-            ("RightShift", "Right Shift"),
+            ("RightCtrl", "Right Control"),
             ("LeftShift", "Left Shift"),
+            ("RightShift", "Right Shift"),
             ("CapsLock", "Caps Lock"),
             ("F13", "F13"),
             ("F14", "F14"),

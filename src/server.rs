@@ -42,7 +42,7 @@ impl WhisperServer {
 
     /// Spawn the whisper server. Blocks briefly to install deps, then returns.
     /// Server readiness is checked separately via `wait_until_ready`.
-    pub fn start(&mut self, server_py: &PathBuf) -> Result<(), String> {
+    pub fn start(&mut self, server_py: &PathBuf, model_arg: Option<&str>) -> Result<(), String> {
         let (exe, pre_args) = find_python()
             .ok_or_else(|| "Python not found. Install Python 3.x from python.org.".to_string())?;
 
@@ -64,6 +64,9 @@ impl WhisperServer {
         let mut cmd = Command::new(&exe);
         cmd.args(&pre_args);
         cmd.arg(server_py);
+        if let Some(model) = model_arg {
+            cmd.args(["--model", model]);
+        }
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::piped());
         #[cfg(windows)]
@@ -90,7 +93,7 @@ impl WhisperServer {
                 if stderr_output.is_empty() {
                     Some(format!("Server exited with {status}"))
                 } else {
-                    stderr_output.truncate(300);
+                    stderr_output.truncate(1000);
                     Some(format!("Server crashed: {stderr_output}"))
                 }
             }

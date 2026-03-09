@@ -1,7 +1,9 @@
+use crate::config::SoundPreset;
+
 const RATE: u32 = 44100;
 
 /// Generate PCM samples for a sine tone with fade envelope.
-fn tone_samples(freq: f32, duration_ms: u32) -> Vec<i16> {
+fn tone_samples(freq: f32, duration_ms: u32, volume: f32) -> Vec<i16> {
     let num = (RATE * duration_ms / 1000) as usize;
     let fade = (RATE as usize * 10) / 1000; // 10ms fade
     let mut out = Vec::with_capacity(num);
@@ -15,7 +17,31 @@ fn tone_samples(freq: f32, duration_ms: u32) -> Vec<i16> {
         } else {
             1.0
         };
-        s *= env * 0.35;
+        s *= env * volume;
+        out.push((s * 32767.0) as i16);
+    }
+    out
+}
+
+/// Generate a frequency sweep from start_freq to end_freq.
+fn sweep_samples(start_freq: f32, end_freq: f32, duration_ms: u32, volume: f32) -> Vec<i16> {
+    let num = (RATE * duration_ms / 1000) as usize;
+    let fade = (RATE as usize * 5) / 1000; // 5ms fade
+    let mut out = Vec::with_capacity(num);
+    let mut phase: f32 = 0.0;
+    for i in 0..num {
+        let t = i as f32 / num as f32;
+        let freq = start_freq + (end_freq - start_freq) * t;
+        phase += freq / RATE as f32;
+        let mut s = (phase * 2.0 * std::f32::consts::PI).sin();
+        let env = if i < fade {
+            i as f32 / fade as f32
+        } else if i > num - fade {
+            (num - i) as f32 / fade as f32
+        } else {
+            1.0
+        };
+        s *= env * volume;
         out.push((s * 32767.0) as i16);
     }
     out
@@ -51,25 +77,110 @@ fn wrap_wav(pcm: &[i16]) -> Vec<u8> {
     wav
 }
 
+/// Build start-recording PCM for a given preset.
+fn start_pcm(preset: &SoundPreset) -> Vec<i16> {
+    let mut pcm = silence_samples(80); // pad for audio device init
+    match preset {
+        SoundPreset::Off => return Vec::new(),
+        SoundPreset::Ping => {
+            // Rising two-note (original)
+            pcm.extend_from_slice(&tone_samples(660.0, 60, 0.35));  // E5
+            pcm.extend_from_slice(&tone_samples(880.0, 60, 0.35));  // A5
+        }
+        SoundPreset::Click => {
+            // Ultra-short percussive tap
+            pcm.extend_from_slice(&tone_samples(1200.0, 15, 0.40));
+        }
+        SoundPreset::Chime => {
+            // Pleasant bell: two harmonics layered
+            let c5 = tone_samples(523.0, 100, 0.20);
+            let e5 = tone_samples(659.0, 100, 0.15);
+            let mixed: Vec<i16> = c5.iter().zip(e5.iter())
+                .map(|(&a, &b)| a.saturating_add(b))
+                .collect();
+            pcm.extend_from_slice(&mixed);
+        }
+        SoundPreset::Chirp => {
+            // Quick ascending sweep
+            pcm.extend_from_slice(&sweep_samples(400.0, 1000.0, 50, 0.35));
+        }
+        SoundPreset::Blip => {
+            // Retro game blip
+            pcm.extend_from_slice(&tone_samples(1047.0, 30, 0.30)); // C6
+            pcm.extend_from_slice(&silence_samples(15));
+            pcm.extend_from_slice(&tone_samples(1319.0, 30, 0.30)); // E6
+        }
+    }
+    pcm
+}
+
+/// Build stop-recording PCM for a given preset.
+fn stop_pcm(preset: &SoundPreset) -> Vec<i16> {
+    let mut pcm = silence_samples(15);
+    match preset {
+        SoundPreset::Off => return Vec::new(),
+        SoundPreset::Ping => {
+            // Single descending note (original)
+            pcm.extend_from_slice(&tone_samples(520.0, 80, 0.35));  // C5
+        }
+        SoundPreset::Click => {
+            pcm.extend_from_slice(&tone_samples(800.0, 15, 0.35));
+        }
+        SoundPreset::Chime => {
+            pcm.extend_from_slice(&tone_samples(392.0, 120, 0.25)); // G4
+        }
+        SoundPreset::Chirp => {
+            // Quick descending sweep
+            pcm.extend_from_slice(&sweep_samples(1000.0, 400.0, 50, 0.35));
+        }
+        SoundPreset::Blip => {
+            pcm.extend_from_slice(&tone_samples(1319.0, 30, 0.30)); // E6
+            pcm.extend_from_slice(&silence_samples(15));
+            pcm.extend_from_slice(&tone_samples(1047.0, 30, 0.30)); // C6
+        }
+    }
+    pcm
+}
+
 /// Play record-start sound (non-blocking).
-pub fn play_start() {
+pub fn play_start_with_preset(preset: &SoundPreset) {
+    if *preset == SoundPreset::Off {
+        return;
+    }
     #[cfg(any(windows, target_os = "macos"))]
     {
-        // Silence pad so audio device initializes before the tone hits
-        let mut pcm = silence_samples(80);
-        pcm.extend_from_slice(&tone_samples(660.0, 60));  // E5
-        pcm.extend_from_slice(&tone_samples(880.0, 60));  // A5
-        play_wav_async(wrap_wav(&pcm));
+        let pcm = start_pcm(preset);
+        if !pcm.is_empty() {
+            play_wav_async(wrap_wav(&pcm));
+        }
     }
 }
 
 /// Play record-stop sound (non-blocking).
-pub fn play_stop() {
+pub fn play_stop_with_preset(preset: &SoundPreset) {
+    if *preset == SoundPreset::Off {
+        return;
+    }
     #[cfg(any(windows, target_os = "macos"))]
     {
-        let mut pcm = silence_samples(15);
-        pcm.extend_from_slice(&tone_samples(520.0, 80));  // C5
-        play_wav_async(wrap_wav(&pcm));
+        let pcm = stop_pcm(preset);
+        if !pcm.is_empty() {
+            play_wav_async(wrap_wav(&pcm));
+        }
+    }
+}
+
+/// Play a preview of the start sound (for Settings UI).
+pub fn play_preview(preset: &SoundPreset) {
+    if *preset == SoundPreset::Off {
+        return;
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let pcm = start_pcm(preset);
+        if !pcm.is_empty() {
+            play_wav_async(wrap_wav(&pcm));
+        }
     }
 }
 

@@ -10,6 +10,89 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SoundPreset {
+    Off,
+    Ping,
+    Click,
+    Chime,
+    Chirp,
+    Blip,
+}
+
+impl Default for SoundPreset {
+    fn default() -> Self {
+        Self::Ping
+    }
+}
+
+impl SoundPreset {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Off => "Off",
+            Self::Ping => "Ping",
+            Self::Click => "Click",
+            Self::Chime => "Chime",
+            Self::Chirp => "Chirp",
+            Self::Blip => "Blip",
+        }
+    }
+
+    pub fn all() -> &'static [SoundPreset] {
+        &[
+            SoundPreset::Off,
+            SoundPreset::Ping,
+            SoundPreset::Click,
+            SoundPreset::Chime,
+            SoundPreset::Chirp,
+            SoundPreset::Blip,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum LocalModelSize {
+    Tiny,
+    Base,
+    Small,
+    Medium,
+}
+
+impl Default for LocalModelSize {
+    fn default() -> Self {
+        Self::Small
+    }
+}
+
+impl LocalModelSize {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Tiny => "Tiny (fastest)",
+            Self::Base => "Base",
+            Self::Small => "Small (recommended)",
+            Self::Medium => "Medium (slow on CPU)",
+        }
+    }
+
+    pub fn arg(&self) -> &str {
+        match self {
+            Self::Tiny => "tiny",
+            Self::Base => "base",
+            Self::Small => "small",
+            Self::Medium => "medium",
+        }
+    }
+
+    pub fn all() -> &'static [LocalModelSize] {
+        &[
+            LocalModelSize::Tiny,
+            LocalModelSize::Base,
+            LocalModelSize::Small,
+            LocalModelSize::Medium,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WhisperProvider {
     Groq,
     OpenAI,
@@ -103,15 +186,25 @@ pub struct Config {
     /// Automatically paste into the active window after transcription
     pub auto_paste: bool,
 
-    /// Play a short beep on record start/stop
+    /// Sound preset for record start/stop
     #[serde(default)]
-    pub sound_enabled: bool,
+    pub sound_preset: SoundPreset,
+
+    /// Legacy: migrated to sound_preset on load.
+    /// Default must be true so that absence of this field (old configs that never
+    /// wrote it) correctly indicates "sound was on" and doesn't false-migrate to Off.
+    #[serde(default = "default_true", skip_serializing)]
+    sound_enabled: bool,
 
     /// Hide to system tray instead of quitting when the window is closed
     #[serde(default = "default_true")]
     pub close_to_tray: bool,
 
     // ── Whisper (speech → text) ───────────────────────────────────────────────
+    /// Model size for local whisper server
+    #[serde(default)]
+    pub local_model_size: LocalModelSize,
+
     pub whisper_provider: WhisperProvider,
     /// Override URL — leave blank to use the provider default
     pub whisper_url_override: String,
@@ -145,9 +238,11 @@ impl Default for Config {
         Self {
             record_key: if cfg!(target_os = "macos") { "F13" } else { "RightAlt" }.to_string(),
             auto_paste: true,
-            sound_enabled: true,
+            sound_preset: SoundPreset::Ping,
+            sound_enabled: true, // legacy default
             close_to_tray: true,
 
+            local_model_size: LocalModelSize::Small,
             whisper_provider: WhisperProvider::Groq,
             whisper_url_override: String::new(),
             whisper_api_key: String::new(),
@@ -235,6 +330,12 @@ impl Config {
         }
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let mut cfg: Self = toml::from_str(&content).unwrap_or_default();
+        // Migrate legacy sound_enabled=false to SoundPreset::Off
+        if !cfg.sound_enabled && cfg.sound_preset == SoundPreset::Ping {
+            // Old config had sound disabled; no sound_preset field was saved.
+            // If sound_preset is still the default (Ping), the user intended Off.
+            cfg.sound_preset = SoundPreset::Off;
+        }
         if !SUPPORTED_KEYS.iter().any(|&(name, _)| name == cfg.record_key) {
             let default_key = if cfg!(target_os = "macos") { "F13" } else { "RightAlt" };
             eprintln!(
