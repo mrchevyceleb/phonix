@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// How many seconds of audio to keep in the pre-roll buffer.
@@ -10,6 +11,10 @@ use std::sync::{Arc, Mutex};
 /// the instant they press the key.
 const PRE_ROLL_SECS: f32 = 0.8;
 
+/// If the audio callback hasn't fired in this many seconds, consider the
+/// stream dead and reopen the mic.
+const STREAM_STALE_SECS: u64 = 2;
+
 pub struct AudioRecorder {
     stream: Option<Stream>,
     /// Rolling ring buffer — always capturing, capped at PRE_ROLL_SECS
@@ -17,6 +22,8 @@ pub struct AudioRecorder {
     /// Active recording buffer — filled from the moment RecordStart fires
     recording: Arc<Mutex<Vec<f32>>>,
     active: Arc<Mutex<bool>>,
+    /// Epoch millis of the last audio callback — used to detect dead streams
+    last_callback: Arc<AtomicU64>,
     pub sample_rate: u32,
     channels: usize,
 }
@@ -30,6 +37,7 @@ impl AudioRecorder {
             pre_roll: Arc::new(Mutex::new(VecDeque::new())),
             recording: Arc::new(Mutex::new(Vec::new())),
             active: Arc::new(Mutex::new(false)),
+            last_callback: Arc::new(AtomicU64::new(0)),
             sample_rate: 44100,
             channels: 1,
         }
@@ -50,6 +58,7 @@ impl AudioRecorder {
         let pre_roll = Arc::clone(&self.pre_roll);
         let recording = Arc::clone(&self.recording);
         let active = Arc::clone(&self.active);
+        let last_cb = Arc::clone(&self.last_callback);
         let channels = self.channels;
         let sample_rate = self.sample_rate;
         let pre_roll_cap = (sample_rate as f32 * PRE_ROLL_SECS) as usize;
@@ -57,6 +66,9 @@ impl AudioRecorder {
         let stream = device.build_input_stream(
             &supported.into(),
             move |data: &[f32], _| {
+                // Stamp the callback time so the health check can detect dead streams
+                last_cb.store(epoch_millis(), Ordering::Relaxed);
+
                 // Downmix to mono
                 let mono: Vec<f32> = if channels > 1 {
                     data.chunks(channels)
@@ -90,6 +102,38 @@ impl AudioRecorder {
         Ok(self.sample_rate)
     }
 
+    /// Returns true if the audio callback has fired within STREAM_STALE_SECS.
+    /// A stale stream means CPAL stopped delivering data (device unplugged,
+    /// driver glitch, etc.).
+    pub fn is_stream_alive(&self) -> bool {
+        let last = self.last_callback.load(Ordering::Relaxed);
+        if last == 0 {
+            // Callback has never fired. If a stream exists it's just warming up
+            // (give it the benefit of the doubt). If no stream, it needs opening.
+            return self.stream.is_some();
+        }
+        let now = epoch_millis();
+        now.saturating_sub(last) < STREAM_STALE_SECS * 1000
+    }
+
+    /// Reopen the mic if the stream has gone stale. Returns the new sample rate
+    /// on success, or None if the stream was still healthy.
+    pub fn ensure_stream(&mut self) -> Option<u32> {
+        if self.is_stream_alive() {
+            return None;
+        }
+        eprintln!("[phonix/audio] stream stale — reopening mic");
+        // Drop old stream before opening a new one
+        self.stream = None;
+        match self.open() {
+            Ok(sr) => Some(sr),
+            Err(e) => {
+                eprintln!("[phonix/audio] reopen failed: {e}");
+                None
+            }
+        }
+    }
+
     /// Begin an active recording. Seeds the buffer with pre-roll so the
     /// first word is never clipped. Returns the number of pre-roll samples
     /// so the caller can distinguish pre-roll from real speech.
@@ -117,4 +161,12 @@ impl AudioRecorder {
         *self.active.lock().unwrap() = false;
         self.recording.lock().unwrap().clone()
     }
+}
+
+/// Current time as milliseconds since the Unix epoch.
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

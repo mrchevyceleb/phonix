@@ -11,10 +11,12 @@ Usage:
     py server.py --model small  # different model size
 """
 
+import gc
 import os
 import sys
 import argparse
 import tempfile
+import threading
 
 # ── CUDA setup ────────────────────────────────────────────────────────────────
 # ctranslate2 needs CUDA 12.x DLLs on PATH. We check common install locations
@@ -103,6 +105,7 @@ print(f"[whisper-server] Ready — http://localhost:{args.port}")
 # ── Flask app ─────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
+_transcribe_lock = threading.Lock()
 
 @app.route("/health")
 def health():
@@ -123,13 +126,21 @@ def transcribe():
         tmp_path = tmp.name
 
     try:
-        segments, _ = model.transcribe(
-            tmp_path,
-            language="en",
-            beam_size=5,
-            vad_filter=True,
-        )
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        # Serialize GPU access: ctranslate2 leaks VRAM when multiple threads
+        # create concurrent CUDA contexts. One request at a time prevents this.
+        with _transcribe_lock:
+            segments, _ = model.transcribe(
+                tmp_path,
+                language="en",
+                beam_size=5,
+                vad_filter=True,
+            )
+            # Consume the generator fully while holding the lock to ensure
+            # all CUDA operations complete before the next request starts.
+            text = " ".join(seg.text.strip() for seg in segments).strip()
+            # Free CUDA tensors while still holding the lock, before the
+            # next request can acquire it and allocate more VRAM.
+            gc.collect()
     finally:
         os.unlink(tmp_path)
 

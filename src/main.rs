@@ -196,6 +196,10 @@ fn main() -> eframe::Result<()> {
                     while let Ok(ev) = hotkey_rx.try_recv() {
                         match ev {
                             hotkey::HotkeyEvent::RecordStart { target_hwnd: hwnd } if !recording => {
+                                // Auto-reconnect if the audio stream died
+                                if let Some(sr) = recorder.ensure_stream() {
+                                    sample_rate = sr;
+                                }
                                 recording = true;
                                 target_hwnd = hwnd;
                                 pre_roll_len = recorder.start();
@@ -224,6 +228,9 @@ fn main() -> eframe::Result<()> {
                     while let Ok(cmd) = cmd_rx.try_recv() {
                         match cmd {
                             PipelineCmd::StartRecording if !recording => {
+                                if let Some(sr) = recorder.ensure_stream() {
+                                    sample_rate = sr;
+                                }
                                 recording = true;
                                 target_hwnd = 0; // Long Dictate never pastes
                                 pre_roll_len = recorder.start();
