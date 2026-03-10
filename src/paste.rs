@@ -42,11 +42,53 @@ fn focus_window(hwnd: u64) {
 }
 
 #[cfg(windows)]
+fn release_modifiers() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    };
+
+    // Left/Right Alt, Ctrl, Shift, Win.
+    // If any are still logically down when we inject text, the first character
+    // can be interpreted as a shortcut (e.g. Alt+F) and get swallowed.
+    let modifier_vks: [u16; 8] = [0xA4, 0xA5, 0xA2, 0xA3, 0xA0, 0xA1, 0x5B, 0x5C];
+
+    for vk in modifier_vks {
+        let is_down = unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 };
+        if !is_down {
+            continue;
+        }
+
+        let key_up = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        unsafe {
+            let _ = SendInput(&[key_up], std::mem::size_of::<INPUT>() as i32);
+        }
+    }
+
+    // Let the target app process key-up events before typing starts.
+    std::thread::sleep(std::time::Duration::from_millis(25));
+}
+
+#[cfg(windows)]
 fn type_text(text: &str) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
         KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     };
+
+    release_modifiers();
 
     // Encode as UTF-16. Surrogate pairs (emoji, etc.) need two events each.
     let utf16: Vec<u16> = text.encode_utf16().collect();
@@ -82,7 +124,7 @@ fn type_text(text: &str) {
         ];
 
         unsafe {
-            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
         }
     }
 }
