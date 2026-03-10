@@ -7,7 +7,7 @@ use crate::config::Config;
 
 /// Send audio samples to a Whisper-compatible API and return the transcript.
 /// Compatible with: OpenAI, Groq, local whisper.cpp --server, LocalAI, etc.
-pub async fn transcribe(samples: Vec<f32>, sample_rate: u32, config: &Config) -> Result<String> {
+pub async fn transcribe(samples: Vec<f32>, sample_rate: u32, config: &Config, client: &reqwest::Client) -> Result<String> {
     if samples.is_empty() {
         return Ok(String::new());
     }
@@ -25,9 +25,6 @@ pub async fn transcribe(samples: Vec<f32>, sample_rate: u32, config: &Config) ->
         .text("language", "en")
         .text("response_format", "text");
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()?;
     let mut req = client.post(&url).multipart(form);
 
     if !config.whisper_api_key.is_empty() {

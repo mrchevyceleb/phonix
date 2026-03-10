@@ -19,12 +19,12 @@ pub struct CleanupResult {
 /// Send raw Whisper output to the LLM for Wispr-style cleanup.
 /// If the local provider fails and a Groq API key is available, falls back to Groq.
 /// On total failure, returns the raw text unmodified — never blocks the pipeline.
-pub async fn cleanup(raw: &str, config: &Config) -> CleanupResult {
+pub async fn cleanup(raw: &str, config: &Config, client: &reqwest::Client) -> CleanupResult {
     if !config.cleanup_enabled || raw.is_empty() {
         return CleanupResult { text: raw.to_string(), warning: None };
     }
 
-    match call_lm(raw, config).await {
+    match call_lm(raw, config, client).await {
         Ok(clean) => CleanupResult { text: clean, warning: None },
         Err(e) => {
             eprintln!("[phonix/cleanup] LLM failed: {e}");
@@ -40,6 +40,7 @@ pub async fn cleanup(raw: &str, config: &Config) -> CleanupResult {
                     CleanupProvider::Groq.model(),
                     &config.whisper_api_key,
                     30,
+                    client,
                 ).await {
                     Ok(clean) => CleanupResult {
                         text: clean,
@@ -60,13 +61,13 @@ pub async fn cleanup(raw: &str, config: &Config) -> CleanupResult {
     }
 }
 
-async fn call_lm(raw: &str, config: &Config) -> Result<String> {
+async fn call_lm(raw: &str, config: &Config, client: &reqwest::Client) -> Result<String> {
     // Use a short timeout for local providers (should respond in <5s if model is loaded)
     let timeout = if config.cleanup_provider == CleanupProvider::Local { 5 } else { 30 };
-    call_lm_with(raw, config.cleanup_url(), config.cleanup_model(), config.cleanup_key(), timeout).await
+    call_lm_with(raw, config.cleanup_url(), config.cleanup_model(), config.cleanup_key(), timeout, client).await
 }
 
-async fn call_lm_with(raw: &str, base_url: &str, model: &str, api_key: &str, timeout_secs: u64) -> Result<String> {
+async fn call_lm_with(raw: &str, base_url: &str, model: &str, api_key: &str, timeout_secs: u64, client: &reqwest::Client) -> Result<String> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
     let body = json!({
@@ -79,10 +80,7 @@ async fn call_lm_with(raw: &str, base_url: &str, model: &str, api_key: &str, tim
         "max_tokens": 512
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build()?;
-    let mut req = client.post(&url).json(&body);
+    let mut req = client.post(&url).json(&body).timeout(std::time::Duration::from_secs(timeout_secs));
 
     if !api_key.is_empty() {
         req = req.bearer_auth(api_key);

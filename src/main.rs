@@ -76,6 +76,11 @@ fn main() -> eframe::Result<()> {
             .name("phonix-pipeline".into())
             .spawn(move || {
                 let rt = Runtime::new().expect("tokio runtime");
+                let http_client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(120))
+                    .pool_max_idle_per_host(2)
+                    .build()
+                    .expect("http client");
                 let mut recorder = AudioRecorder::new();
                 let mut sample_rate = 44100u32;
                 let mut recording = false;
@@ -108,7 +113,8 @@ fn main() -> eframe::Result<()> {
                                            long_dictate: bool,
                                            event_tx: &crossbeam_channel::Sender<AppEvent>,
                                            flags: &Arc<Mutex<SharedFlags>>,
-                                           overlay: &Arc<Option<overlay::Overlay>>| {
+                                           overlay: &Arc<Option<overlay::Overlay>>,
+                                           client: &reqwest::Client| {
                     let tx = event_tx.clone();
                     let flags = Arc::clone(flags);
                     let ov = Arc::clone(overlay);
@@ -116,6 +122,7 @@ fn main() -> eframe::Result<()> {
                     let hwnd = target_hwnd;
                     let for_ld = long_dictate;
                     let cfg = Config::load();
+                    let client = client.clone();
 
                     rt.spawn(async move {
                         let hide_overlay = || {
@@ -140,7 +147,7 @@ fn main() -> eframe::Result<()> {
 
                         let _ = tx.try_send(AppEvent::StatusUpdate("Transcribing\u{2026}".into()));
 
-                        let raw = match whisper::transcribe(samples, sample_rate, &cfg).await {
+                        let raw = match whisper::transcribe(samples, sample_rate, &cfg, &client).await {
                             Ok(r) => r,
                             Err(e) => {
                                 hide_overlay();
@@ -164,7 +171,7 @@ fn main() -> eframe::Result<()> {
                                 o.set_state(overlay::STATE_CLEANING);
                             }
                             let _ = tx.try_send(AppEvent::StatusUpdate("Cleaning up\u{2026}".into()));
-                            let result = cleanup::cleanup(&raw, &cfg).await;
+                            let result = cleanup::cleanup(&raw, &cfg, &client).await;
                             if let Some(warning) = result.warning {
                                 let _ = tx.try_send(AppEvent::StatusUpdate(warning));
                                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -217,7 +224,7 @@ fn main() -> eframe::Result<()> {
                                 spawn_transcription(
                                     &rt, samples, sample_rate, pre_roll_len,
                                     target_hwnd, long_dictate_at_start,
-                                    &event_tx, &flags, &pipeline_overlay,
+                                    &event_tx, &flags, &pipeline_overlay, &http_client,
                                 );
                             }
                             _ => {}
@@ -248,7 +255,7 @@ fn main() -> eframe::Result<()> {
                                 spawn_transcription(
                                     &rt, samples, sample_rate, pre_roll_len,
                                     target_hwnd, long_dictate_at_start,
-                                    &event_tx, &flags, &pipeline_overlay,
+                                    &event_tx, &flags, &pipeline_overlay, &http_client,
                                 );
                             }
                             _ => {}

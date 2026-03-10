@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 /// When the hotkey fires, we include this pre-roll so the first
 /// syllable is never clipped even if the user starts speaking
 /// the instant they press the key.
-const PRE_ROLL_SECS: f32 = 0.8;
+const PRE_ROLL_SECS: f32 = 1.5;
 
 /// If the audio callback hasn't fired in this many seconds, consider the
 /// stream dead and reopen the mic.
@@ -138,21 +138,26 @@ impl AudioRecorder {
     /// first word is never clipped. Returns the number of pre-roll samples
     /// so the caller can distinguish pre-roll from real speech.
     pub fn start(&self) -> usize {
-        // Snapshot pre-roll first, then clear recording and seed it.
-        // This lock ordering avoids holding both locks simultaneously,
-        // which would block the audio callback.
+        // Set active FIRST so the audio callback starts appending to the
+        // recording buffer immediately. Then snapshot and prepend the
+        // pre-roll. This eliminates the gap where samples could be lost
+        // (callback writes to pre-roll after snapshot but before active=true).
+        *self.active.lock().unwrap() = true;
+
         let pre_roll_data: Vec<f32> = {
-            let pr = self.pre_roll.lock().unwrap();
-            pr.iter().copied().collect()
+            let mut pr = self.pre_roll.lock().unwrap();
+            let data: Vec<f32> = pr.iter().copied().collect();
+            pr.clear();
+            data
         };
         let pre_roll_len = pre_roll_data.len();
 
+        // Prepend pre-roll to whatever the callback has already appended
         let mut rec = self.recording.lock().unwrap();
-        rec.clear();
+        let live = rec.split_off(0);
         rec.extend_from_slice(&pre_roll_data);
-        drop(rec);
+        rec.extend_from_slice(&live);
 
-        *self.active.lock().unwrap() = true;
         pre_roll_len
     }
 
