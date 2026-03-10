@@ -334,6 +334,10 @@ fn maybe_start_local_server(
     // Kill any zombie whisper-server processes from previous runs
     server::WhisperServer::kill_stale();
 
+    // Brief pause to let the OS release CUDA contexts and free port 8080
+    // after killing stale processes.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
     let mut srv = server::WhisperServer::new();
     let model_arg = config.local_model_size.arg();
     if let Err(e) = srv.start(&server_py, Some(model_arg)) {

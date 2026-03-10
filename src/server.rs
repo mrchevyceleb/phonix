@@ -19,12 +19,32 @@ impl WhisperServer {
 
     /// Kill any leftover whisper-server processes from previous runs.
     /// Prevents zombie Python processes from piling up if the app crashed.
+    ///
+    /// Two-phase approach:
+    ///   1. Kill ALL python processes whose command line contains whisper-server/server.py.
+    ///      This catches orphans that crashed during model loading (before binding port 8080)
+    ///      and processes left behind when Phonix was force-closed.
+    ///   2. Kill anything still listening on port 8080 as a fallback.
     pub fn kill_stale() {
         #[cfg(windows)]
         {
-            // Find python processes listening on port 8080
+            // Phase 1: Kill by command line match (catches everything, including
+            // processes that never bound port 8080 but still hold CUDA contexts).
+            // Filter on Name='python.exe' to avoid self-matching the PowerShell
+            // process whose own command line contains the query text.
+            let _ = Command::new("powershell")
+                .args([
+                    "-NoProfile", "-Command",
+                    "Get-CimInstance Win32_Process -Filter \"Name='python.exe' AND CommandLine like '%whisper-server%server.py%'\" | ForEach-Object { taskkill /F /T /PID $_.ProcessId 2>$null }",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+
+            // Phase 2: Also kill anything listening on port 8080.
             let _ = Command::new("cmd")
-                .args(["/C", "for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :8080 ^| findstr LISTENING') do taskkill /F /T /PID %a"])
+                .args(["/C", "for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :8080 ^| findstr LISTENING') do taskkill /F /T /PID %a >nul 2>&1"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .creation_flags(CREATE_NO_WINDOW)
@@ -32,7 +52,14 @@ impl WhisperServer {
         }
         #[cfg(target_os = "macos")]
         {
-            let _ = std::process::Command::new("sh")
+            // Phase 1: Kill by command line match
+            let _ = Command::new("sh")
+                .args(["-c", "pkill -9 -f 'whisper-server.*server\\.py' 2>/dev/null"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            // Phase 2: Kill anything on port 8080
+            let _ = Command::new("sh")
                 .args(["-c", "lsof -ti :8080 | xargs kill -9 2>/dev/null"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
