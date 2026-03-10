@@ -164,7 +164,9 @@ impl AudioRecorder {
     /// Stop the active recording and return the captured samples.
     pub fn stop(&self) -> Vec<f32> {
         *self.active.lock().unwrap() = false;
-        self.recording.lock().unwrap().clone()
+        let mut rec = self.recording.lock().unwrap();
+        let samples = std::mem::take(&mut *rec);
+        samples
     }
 }
 
