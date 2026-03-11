@@ -132,6 +132,7 @@ impl WhisperServer {
     /// Returns Ok after the server is up, Err if it times out.
     pub fn wait_until_ready(&mut self, timeout: Duration) -> Result<(), String> {
         let start = Instant::now();
+        let mut port_conflict_detected = false;
         loop {
             if let Some(err) = self.check_early_exit() {
                 return Err(err);
@@ -139,7 +140,20 @@ impl WhisperServer {
             if is_server_ready() {
                 return Ok(());
             }
+            // If something responds on 8080 but it's not our server, flag it
+            if !port_conflict_detected && is_port_occupied() {
+                port_conflict_detected = true;
+                eprintln!(
+                    "[phonix/server] WARNING: Port 8080 is occupied by another application. \
+                     Whisper server cannot bind. Close the conflicting app and restart Phonix."
+                );
+            }
             if start.elapsed() > timeout {
+                if port_conflict_detected {
+                    return Err(
+                        "Port 8080 is occupied by another application. Close it and restart Phonix.".to_string()
+                    );
+                }
                 return Err(
                     "Whisper server did not start within 60s. Check that Python 3 and its dependencies (flask, faster-whisper) are installed.".to_string()
                 );
@@ -172,6 +186,23 @@ impl Drop for WhisperServer {
                 .status();
         }
     }
+}
+
+/// Check if something is listening on port 8080 (even if it's not our server).
+fn is_port_occupied() -> bool {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &"127.0.0.1:8080".parse().unwrap(),
+        Duration::from_millis(300),
+    ) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+    let _ = stream.write_all(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
+    let mut buf = [0u8; 1];
+    matches!(stream.read(&mut buf), Ok(n) if n > 0)
 }
 
 /// Find whisper-server/server.py relative to the running executable.
@@ -214,7 +245,8 @@ pub fn is_server_ready_public() -> bool {
     is_server_ready()
 }
 
-/// Send a real HTTP GET /health and return true if we get any response back.
+/// Send a real HTTP GET /health and return true only if the response body is "ok".
+/// This prevents false positives when another service (e.g. a proxy) occupies the port.
 /// Unlike bare TCP polling, this completes the HTTP transaction so single-threaded
 /// Flask doesn't block waiting for a request that never arrives.
 fn is_server_ready() -> bool {
@@ -229,8 +261,13 @@ fn is_server_ready() -> bool {
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
     let _ = stream.write_all(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
-    let mut buf = [0u8; 32];
-    matches!(stream.read(&mut buf), Ok(n) if n > 0)
+    let mut buf = [0u8; 512];
+    let Ok(n) = stream.read(&mut buf) else {
+        return false;
+    };
+    let response = String::from_utf8_lossy(&buf[..n]);
+    // Check for HTTP 200 and body containing "ok"
+    response.contains("200") && response.contains("ok")
 }
 
 /// Find a working Python executable. Tries py -3.13, py -3.12, py, python3, python.

@@ -145,4 +145,4 @@ if __name__ == "__main__":
     # With threaded=True, each Flask request thread creates a new context
     # that leaks VRAM even after the thread exits. Single-threaded mode
     # reuses one context for all requests, eliminating the leak.
-    app.run(host="0.0.0.0", port=args.port, debug=False, threaded=False)
+    app.run(host="127.0.0.1", port=args.port, debug=False, threaded=False)
