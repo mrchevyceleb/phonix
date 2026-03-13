@@ -4,8 +4,8 @@ use anyhow::Result;
 ///
 /// Strategy:
 ///   1. Restore focus to `target_hwnd` (the window active at key-press time)
-///   2. Clipboard + Shift+Insert (avoids Ctrl, which causes ghost double-paste
-///      when LeftCtrl is part of the hotkey combo)
+///   2. Flush all modifier keys (prevents ghost Ctrl/Alt state)
+///   3. Inject text via Unicode SendInput (key-down only, no key-up)
 pub fn paste(text: &str, target_hwnd: u64) -> Result<()> {
     if target_hwnd != 0 {
         focus_window(target_hwnd);
@@ -38,103 +38,66 @@ fn focus_window(hwnd: u64) {
 }
 
 #[cfg(windows)]
-fn type_text(text: &str) {
+fn release_modifiers() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
 
-    // Clipboard + Shift+Insert paste. Completely avoids Ctrl, which causes
-    // ghost double-paste when LeftCtrl is part of the hotkey combo.
-    // Shift+Insert is the universal Windows paste shortcut that predates
-    // Ctrl+V and works in virtually every app.
+    // Unconditionally send key-up for all modifier keys to clear any ghost
+    // state left by SetForegroundWindow after the hotkey combo is released.
+    let modifier_vks: [u16; 8] = [0xA4, 0xA5, 0xA2, 0xA3, 0xA0, 0xA1, 0x5B, 0x5C];
 
-    // Save clipboard, set our text
-    let old_clipboard = arboard::Clipboard::new()
-        .ok()
-        .and_then(|mut cb| cb.get_text().ok());
+    let key_ups: Vec<INPUT> = modifier_vks.iter().map(|&vk| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: 0,
+                dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0),
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }).collect();
 
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        if cb.set_text(text).is_err() {
-            return;
-        }
-    } else {
-        return;
+    unsafe {
+        let _ = SendInput(&key_ups, std::mem::size_of::<INPUT>() as i32);
     }
-
     std::thread::sleep(std::time::Duration::from_millis(50));
+}
 
-    // Shift+Insert (no Ctrl involved at all)
-    let vk_shift: u16 = 0xA0;  // VK_LSHIFT
-    let vk_insert: u16 = 0x2D; // VK_INSERT
+#[cfg(windows)]
+fn type_text(text: &str) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYEVENTF_UNICODE,
+    };
 
-    let inputs: [INPUT; 4] = [
-        // Shift down
+    release_modifiers();
+
+    // Unicode SendInput with key-down events only. Key-up events are
+    // intentionally omitted: Windows generates WM_CHAR from key-down alone
+    // for KEYEVENTF_UNICODE, and including key-up caused some apps to
+    // double-process each character.
+    let utf16: Vec<u16> = text.encode_utf16().collect();
+    let inputs: Vec<INPUT> = utf16.iter().map(|&codeunit| {
         INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(vk_shift),
-                    wScan: 0,
-                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
+                    wScan: codeunit,
+                    dwFlags: KEYEVENTF_UNICODE,
                     time: 0,
                     dwExtraInfo: 0,
                 },
             },
-        },
-        // Insert down
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(vk_insert),
-                    wScan: 0,
-                    dwFlags: KEYBD_EVENT_FLAGS(0),
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-        // Insert up
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(vk_insert),
-                    wScan: 0,
-                    dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0),
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-        // Shift up
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(vk_shift),
-                    wScan: 0,
-                    dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0),
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-    ];
+        }
+    }).collect();
 
     unsafe {
         let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
-
-    // Wait for target app to process the paste
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    // Restore original clipboard
-    if let Some(old_text) = old_clipboard {
-        if let Ok(mut cb) = arboard::Clipboard::new() {
-            let _ = cb.set_text(&old_text);
-        }
     }
 }
 
