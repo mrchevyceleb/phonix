@@ -3,7 +3,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::hotkey::SUPPORTED_KEYS;
+use crate::hotkey;
 
 fn default_true() -> bool {
     true
@@ -336,7 +336,7 @@ impl Config {
             // If sound_preset is still the default (Ping), the user intended Off.
             cfg.sound_preset = SoundPreset::Off;
         }
-        if !SUPPORTED_KEYS.iter().any(|&(name, _)| name == cfg.record_key) {
+        if !hotkey::is_valid_key_combo(&cfg.record_key) {
             let default_key = if cfg!(target_os = "macos") { "F13" } else { "RightAlt" };
             eprintln!(
                 "[phonix/config] invalid record_key '{}', resetting to {}",

@@ -14,15 +14,28 @@ Phonix captures audio via your microphone, sends it to a Whisper-compatible API 
 
 ### macOS (Alpha)
 
-Download `Phonix-x.x.x-macos.dmg` from the [Releases](../../releases/latest) page. Open the DMG and drag Phonix to your Applications folder.
+Download `Phonix-x.x.x-macos.dmg` from the [Releases](../../releases/latest) page.
 
-**Important:** macOS support is alpha. It may have severe bugs. Please report issues on the [Issues](../../issues) page.
+**The app is not notarized**, so macOS Gatekeeper will block it. To install:
+
+1. Open the DMG
+2. Open **Terminal** and run:
+   ```bash
+   bash /Volumes/Phonix/install.sh
+   ```
+   This strips the quarantine flag and copies Phonix to /Applications.
+
+   Or do it manually:
+   ```bash
+   cp -R /Volumes/Phonix/Phonix.app /Applications/
+   xattr -cr /Applications/Phonix.app
+   ```
 
 On first launch, macOS will ask for two permissions:
 - **Microphone** -- required for voice capture
 - **Accessibility** (System Settings > Privacy & Security > Accessibility) -- required for hotkey detection and pasting text into other apps
 
-The app is not code-signed. Right-click > Open to bypass Gatekeeper on first launch.
+**Important:** macOS support is alpha. It may have bugs. Please report issues on the [Issues](../../issues) page.
 
 Phonix checks for updates automatically on launch and shows a notification banner if a newer version is available.
 
@@ -60,7 +73,7 @@ All settings are in the UI (Settings tab) and saved to:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Record key | `RightAlt` (Windows) / `F13` (macOS) | Hold to record. Options: `RightAlt`, `LeftAlt`, `RightCtrl`, `LeftCtrl`, `RightShift`, `LeftShift`, `CapsLock`, `ScrollLock` (Windows only), `F13`--`F16` |
+| Record key | `RightAlt` (Windows) / `F13` (macOS) | Hold to record. Single keys or combos (e.g. `LeftCtrl+LeftShift`). Use "Record a combo" in Settings to capture multi-key combos. |
 | Auto-paste | `true` | Type text into the active window after transcription |
 | Sound effect | `true` | Play a tone on record start/stop |
 | Close to tray | `true` | Hide to system tray instead of quitting when the window is closed |

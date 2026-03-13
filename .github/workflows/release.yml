@@ -88,13 +88,20 @@ jobs:
           # Generate Info.plist with correct version
           sed "s/1.0.0/$VERSION/g" macos/Info.plist > Phonix.app/Contents/Info.plist
 
-      - name: Ad-hoc codesign
-        run: |
-          codesign --force --deep -s - Phonix.app
+      # NOTE: No codesign step. Ad-hoc signatures cause macOS to show
+      # "damaged and can't be opened" with no bypass. Without any signature,
+      # users can strip quarantine via the install script or xattr -cr.
+      # Proper fix requires an Apple Developer ID cert ($99/year).
 
       - name: Create DMG
         run: |
-          hdiutil create -volname "Phonix" -srcfolder Phonix.app -ov -format UDZO "Phonix-${GITHUB_REF_NAME#v}-macos.dmg"
+          # Stage DMG contents: app + install script
+          mkdir -p dmg-stage
+          cp -R Phonix.app dmg-stage/
+          cp macos/install.sh dmg-stage/
+          chmod +x dmg-stage/install.sh
+
+          hdiutil create -volname "Phonix" -srcfolder dmg-stage -ov -format UDZO "Phonix-${GITHUB_REF_NAME#v}-macos.dmg"
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4

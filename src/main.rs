@@ -15,6 +15,7 @@ mod update;
 mod whisper;
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use app::{AppEvent, PhonixApp, PipelineCmd, SharedFlags};
 use audio::AudioRecorder;
@@ -23,6 +24,20 @@ use crossbeam_channel::bounded;
 use store::Store;
 use tokio::runtime::Runtime;
 
+/// Debug logger that writes to %APPDATA%/phonix/Phonix/config/debug.log.
+/// GUI apps have no stderr, so this is the only way to see what's happening.
+fn dbg_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let path = std::path::PathBuf::from(appdata)
+            .join("phonix").join("Phonix").join("config").join("debug.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let now = chrono::Local::now().format("%H:%M:%S%.3f");
+            let _ = writeln!(f, "[{now}] {msg}");
+        }
+    }
+}
+
 fn main() -> eframe::Result<()> {
     let config = Config::load();
     let store = Arc::new(Mutex::new(Store::load()));
@@ -30,6 +45,7 @@ fn main() -> eframe::Result<()> {
     let flags = Arc::new(Mutex::new(SharedFlags {
         long_dictate_active: false,
         auto_paste: config.auto_paste,
+        paste_in_progress: false,
     }));
 
     // Channels
@@ -42,7 +58,12 @@ fn main() -> eframe::Result<()> {
 
     // ── Local Whisper server (auto-start when provider = Local) ───────────────
     // Keep _whisper_server alive until the app exits — Drop kills the process.
-    let _whisper_server = maybe_start_local_server(&config, &event_tx);
+    // server_ready is false until the health poll confirms the server is up.
+    // Non-local providers are always "ready".
+    let server_ready = Arc::new(AtomicBool::new(
+        config.whisper_provider != config::WhisperProvider::Local,
+    ));
+    let _whisper_server = maybe_start_local_server(&config, &event_tx, &server_ready);
 
     // ── macOS Accessibility permission check ─────────────────────────────────
     #[cfg(target_os = "macos")]
@@ -62,8 +83,15 @@ fn main() -> eframe::Result<()> {
     let rec_overlay = overlay::Overlay::new();
     let shared_overlay: Arc<Option<overlay::Overlay>> = Arc::new(rec_overlay);
 
+    // ── Paste guard ──────────────────────────────────────────────────────────
+    // Shared AtomicBool that suppresses hotkey events during (and briefly
+    // after) paste operations. SetForegroundWindow generates ghost Alt
+    // keypresses that the 500ms cooldown can't catch because the cooldown
+    // starts at RecordStop, long before the async transcription finishes.
+    let paste_guard = Arc::new(AtomicBool::new(false));
+
     // ── Hotkey polling thread ─────────────────────────────────────────────────
-    hotkey::start_polling(config.record_key.clone(), hotkey_tx);
+    hotkey::start_polling(config.record_key.clone(), hotkey_tx, Arc::clone(&paste_guard));
 
     // ── Pipeline thread ───────────────────────────────────────────────────────
     {
@@ -72,6 +100,8 @@ fn main() -> eframe::Result<()> {
         let event_tx = event_tx.clone();
         let cmd_rx = cmd_rx;
         let pipeline_overlay = Arc::clone(&shared_overlay);
+        let server_ready = Arc::clone(&server_ready);
+        let paste_guard = Arc::clone(&paste_guard);
         std::thread::Builder::new()
             .name("phonix-pipeline".into())
             .spawn(move || {
@@ -87,6 +117,10 @@ fn main() -> eframe::Result<()> {
                 let mut target_hwnd: u64 = 0;
                 let mut pre_roll_len: usize = 0;
                 let mut long_dictate_at_start = false;
+                // Cooldown: ignore RecordStart within 2s of last completed
+                // transcription+paste. Prevents ghost double-recordings.
+                // Stores epoch millis of last completion (0 = never).
+                let last_done = Arc::new(AtomicU64::new(0));
 
                 // Helper: set overlay state from the pipeline thread
                 let set_overlay = |state: u8| {
@@ -114,10 +148,14 @@ fn main() -> eframe::Result<()> {
                                            event_tx: &crossbeam_channel::Sender<AppEvent>,
                                            flags: &Arc<Mutex<SharedFlags>>,
                                            overlay: &Arc<Option<overlay::Overlay>>,
-                                           client: &reqwest::Client| {
+                                           client: &reqwest::Client,
+                                           paste_guard: &Arc<AtomicBool>,
+                                           last_done: &Arc<AtomicU64>| {
                     let tx = event_tx.clone();
                     let flags = Arc::clone(flags);
                     let ov = Arc::clone(overlay);
+                    let paste_guard = Arc::clone(paste_guard);
+                    let last_done = Arc::clone(last_done);
                     let prl = pre_roll_len;
                     let hwnd = target_hwnd;
                     let for_ld = long_dictate;
@@ -130,6 +168,10 @@ fn main() -> eframe::Result<()> {
                                 o.set_state(overlay::STATE_HIDDEN);
                             }
                         };
+                        let ready_msg = format!(
+                            "Ready \u{2014} hold {} to dictate",
+                            hotkey::format_hotkey_display(&cfg.record_key),
+                        );
 
                         // Guard: ignore clips where actual speech is shorter than 0.5s
                         let speech_samples = samples.len().saturating_sub(prl);
@@ -139,9 +181,7 @@ fn main() -> eframe::Result<()> {
                                 "Too short \u{2014} try again".into(),
                             ));
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            let _ = tx.try_send(AppEvent::StatusUpdate(
-                                "Ready \u{2014} hold key to dictate".into(),
-                            ));
+                            let _ = tx.try_send(AppEvent::StatusUpdate(ready_msg));
                             return;
                         }
 
@@ -160,9 +200,7 @@ fn main() -> eframe::Result<()> {
                             hide_overlay();
                             let _ = tx.try_send(AppEvent::StatusUpdate("No speech detected".into()));
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            let _ = tx.try_send(AppEvent::StatusUpdate(
-                                "Ready \u{2014} hold key to dictate".into(),
-                            ));
+                            let _ = tx.try_send(AppEvent::StatusUpdate(ready_msg));
                             return;
                         }
 
@@ -181,6 +219,9 @@ fn main() -> eframe::Result<()> {
                             raw.clone()
                         };
 
+                        dbg_log(&format!("raw={:?}", &raw));
+                        dbg_log(&format!("cleaned={:?}", &text));
+
                         // Auto-paste unless in long dictate mode
                         let do_paste = {
                             let f = flags.lock().unwrap();
@@ -188,12 +229,34 @@ fn main() -> eframe::Result<()> {
                         } && !for_ld;
 
                         if do_paste {
-                            if let Err(e) = paste::paste(&text, hwnd) {
-                                eprintln!("[phonix/paste] {e}");
+                            // Activate paste guard BEFORE pasting — tells the hotkey
+                            // thread to suppress any ghost keypresses triggered by
+                            // SetForegroundWindow / SendInput.
+                            paste_guard.store(true, Ordering::Release);
+                            {
+                                let mut f = flags.lock().unwrap();
+                                f.paste_in_progress = true;
                             }
+                            dbg_log(&format!("paste: starting, text_len={}, text={:?}", text.len(), &text));
+                            if let Err(e) = paste::paste(&text, hwnd) {
+                                dbg_log(&format!("paste: error {e}"));
+                            }
+                            // Brief delay after paste so ghost key-up events from
+                            // SendInput settle before we re-enable hotkey detection.
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            {
+                                let mut f = flags.lock().unwrap();
+                                f.paste_in_progress = false;
+                            }
+                            paste_guard.store(false, Ordering::Release);
+                            dbg_log("paste: done, guard cleared");
                         }
 
                         hide_overlay();
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                        last_done.store(now_ms, Ordering::Release);
+                        dbg_log(&format!("transcription complete, last_done={now_ms}"));
                         let _ = tx.try_send(AppEvent::Transcribed { text, raw, for_long_dictate: for_ld });
                     });
                 };
@@ -203,6 +266,36 @@ fn main() -> eframe::Result<()> {
                     while let Ok(ev) = hotkey_rx.try_recv() {
                         match ev {
                             hotkey::HotkeyEvent::RecordStart { target_hwnd: hwnd } if !recording => {
+                                dbg_log(&format!("RecordStart hwnd={hwnd}"));
+                                // Block recording while local server is still loading
+                                if !server_ready.load(Ordering::Relaxed) {
+                                    dbg_log("  blocked: server not ready");
+                                    let _ = event_tx.try_send(AppEvent::StatusUpdate(
+                                        "Server still loading, please wait...".into(),
+                                    ));
+                                    continue;
+                                }
+                                // Block recording while paste is in progress (prevents
+                                // ghost triggers from SetForegroundWindow synthetic Alt events)
+                                if flags.lock().unwrap().paste_in_progress {
+                                    dbg_log("  blocked: paste_in_progress");
+                                    continue;
+                                }
+                                // Ignore recordings within 2s of last completed transcription.
+                                // Catches ghost double-fires that bypass other guards.
+                                {
+                                    let done_ms = last_done.load(Ordering::Relaxed);
+                                    if done_ms > 0 {
+                                        let now_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                                        let elapsed = now_ms.saturating_sub(done_ms);
+                                        if elapsed < 2000 {
+                                            dbg_log(&format!("  blocked: {elapsed}ms since last transcription"));
+                                            continue;
+                                        }
+                                    }
+                                }
+                                dbg_log("  -> recording started");
                                 // Auto-reconnect if the audio stream died
                                 if let Some(sr) = recorder.ensure_stream() {
                                     sample_rate = sr;
@@ -216,8 +309,10 @@ fn main() -> eframe::Result<()> {
                                 let _ = event_tx.try_send(AppEvent::RecordingStarted);
                             }
                             hotkey::HotkeyEvent::RecordStop if recording => {
+                                dbg_log(&format!("RecordStop (was recording, samples pending)"));
                                 recording = false;
                                 let samples = recorder.stop();
+                                dbg_log(&format!("  samples={} pre_roll={pre_roll_len}", samples.len()));
                                 set_overlay(overlay::STATE_TRANSCRIBING);
                                 sound::play_stop_with_preset(&Config::load().sound_preset);
                                 let _ = event_tx.try_send(AppEvent::RecordingStopped);
@@ -225,6 +320,7 @@ fn main() -> eframe::Result<()> {
                                     &rt, samples, sample_rate, pre_roll_len,
                                     target_hwnd, long_dictate_at_start,
                                     &event_tx, &flags, &pipeline_overlay, &http_client,
+                                    &paste_guard, &last_done,
                                 );
                             }
                             _ => {}
@@ -235,6 +331,12 @@ fn main() -> eframe::Result<()> {
                     while let Ok(cmd) = cmd_rx.try_recv() {
                         match cmd {
                             PipelineCmd::StartRecording if !recording => {
+                                if !server_ready.load(Ordering::Relaxed) {
+                                    let _ = event_tx.try_send(AppEvent::StatusUpdate(
+                                        "Server still loading, please wait...".into(),
+                                    ));
+                                    continue;
+                                }
                                 if let Some(sr) = recorder.ensure_stream() {
                                     sample_rate = sr;
                                 }
@@ -256,6 +358,7 @@ fn main() -> eframe::Result<()> {
                                     &rt, samples, sample_rate, pre_roll_len,
                                     target_hwnd, long_dictate_at_start,
                                     &event_tx, &flags, &pipeline_overlay, &http_client,
+                                    &paste_guard, &last_done,
                                 );
                             }
                             _ => {}
@@ -310,6 +413,7 @@ fn main() -> eframe::Result<()> {
 fn maybe_start_local_server(
     config: &Config,
     event_tx: &crossbeam_channel::Sender<AppEvent>,
+    server_ready: &Arc<AtomicBool>,
 ) -> Option<Arc<Mutex<server::WhisperServer>>> {
     use config::WhisperProvider;
 
@@ -351,9 +455,16 @@ fn maybe_start_local_server(
     // Health-poll in background — updates status when ready
     let tx = event_tx.clone();
     let srv_poll = Arc::clone(&srv);
+    let model_label = config.local_model_size.arg().to_string();
+    let ready_msg = format!(
+        "Ready \u{2014} hold {} to dictate",
+        hotkey::format_hotkey_display(&config.record_key),
+    );
+    let ready_flag = Arc::clone(server_ready);
     std::thread::spawn(move || {
-        let timeout = std::time::Duration::from_secs(60);
         let start = std::time::Instant::now();
+        let mut last_status_secs = 0u64;
+        let mut warned_slow = false;
         loop {
             // Check if the server process crashed
             if let Ok(mut s) = srv_poll.lock() {
@@ -363,14 +474,26 @@ fn maybe_start_local_server(
                 }
             }
             if server::is_server_ready_public() {
-                let _ = tx.try_send(AppEvent::StatusUpdate("Ready \u{2014} hold key to dictate".into()));
+                ready_flag.store(true, Ordering::Relaxed);
+                let _ = tx.try_send(AppEvent::StatusUpdate(ready_msg));
                 return;
             }
-            if start.elapsed() > timeout {
-                let _ = tx.try_send(AppEvent::Error(
-                    "Whisper server did not start within 60s. Check that Python 3 and its dependencies (flask, faster-whisper) are installed.".into(),
+            let elapsed = start.elapsed().as_secs();
+            // After 120s, show a warning but keep trying (model loading can be slow)
+            if elapsed > 120 && !warned_slow {
+                warned_slow = true;
+                let _ = tx.try_send(AppEvent::StatusUpdate(
+                    format!("Still loading Whisper ({model_label})... this may take a few minutes on first run"),
                 ));
-                return;
+            }
+            // Update status every 5 seconds so user knows it's still loading
+            if elapsed >= 5 && elapsed / 5 != last_status_secs / 5 {
+                last_status_secs = elapsed;
+                if !warned_slow {
+                    let _ = tx.try_send(AppEvent::StatusUpdate(
+                        format!("Loading Whisper ({model_label})... {elapsed}s"),
+                    ));
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(400));
         }

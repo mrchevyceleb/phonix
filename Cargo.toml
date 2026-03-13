@@ -1,6 +1,6 @@
 [package]
 name = "phonix"
-version = "1.4.2"
+version = "1.4.3"
 edition = "2021"
 description = "Local voice dictation — hold a key, speak, text appears anywhere"
 license = "MIT"

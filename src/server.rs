@@ -10,11 +10,12 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub struct WhisperServer {
     child: Option<Child>,
+    log_path: Option<PathBuf>,
 }
 
 impl WhisperServer {
     pub fn new() -> Self {
-        Self { child: None }
+        Self { child: None, log_path: None }
     }
 
     /// Kill any leftover whisper-server processes from previous runs.
@@ -73,20 +74,31 @@ impl WhisperServer {
         let (exe, pre_args) = find_python()
             .ok_or_else(|| "Python not found. Install Python 3.x from python.org.".to_string())?;
 
-        // Auto-install Flask + faster-whisper if needed
-        let req = server_py.parent().unwrap().join("requirements.txt");
-        if req.exists() {
-            let mut cmd = Command::new(&exe);
-            cmd.args(&pre_args);
-            cmd.args(["-m", "pip", "install", "-r"]);
-            cmd.arg(&req);
-            cmd.arg("--quiet");
-            cmd.stdout(Stdio::null());
-            cmd.stderr(Stdio::null());
-            #[cfg(windows)]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let _ = cmd.status(); // best-effort, ignore errors
+        // Auto-install Flask + faster-whisper only if they're not already importable.
+        // Skipping pip when deps exist saves 5-10s on every startup.
+        if !check_python_deps(&exe, &pre_args) {
+            let req = server_py.parent().unwrap().join("requirements.txt");
+            if req.exists() {
+                let mut cmd = Command::new(&exe);
+                cmd.args(&pre_args);
+                cmd.args(["-m", "pip", "install", "-r"]);
+                cmd.arg(&req);
+                cmd.arg("--quiet");
+                cmd.stdout(Stdio::null());
+                cmd.stderr(Stdio::null());
+                #[cfg(windows)]
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                let _ = cmd.status(); // best-effort, ignore errors
+            }
         }
+
+        // Write stderr to a log file instead of piping it.
+        // Flask (single-threaded) logs every request to stderr. If we pipe stderr
+        // and never drain it, the OS pipe buffer (~4KB on Windows) fills up and
+        // Flask blocks on the write, deadlocking the entire server.
+        let log_path = server_py.parent().unwrap().join("server.log");
+        let log_file = std::fs::File::create(&log_path)
+            .map_err(|e| format!("Failed to create server log: {e}"))?;
 
         let mut cmd = Command::new(&exe);
         cmd.args(&pre_args);
@@ -95,7 +107,7 @@ impl WhisperServer {
             cmd.args(["--model", model]);
         }
         cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::piped());
+        cmd.stderr(Stdio::from(log_file));
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
 
@@ -104,24 +116,26 @@ impl WhisperServer {
             .map_err(|e| format!("Failed to spawn whisper server: {e}"))?;
 
         self.child = Some(child);
+        self.log_path = Some(log_path);
         Ok(())
     }
 
-    /// Check if the server process exited early. Returns the stderr output if it did.
+    /// Check if the server process exited early. Returns the log output if it did.
     pub fn check_early_exit(&mut self) -> Option<String> {
         let child = self.child.as_mut()?;
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stderr_output = String::new();
-                if let Some(mut stderr) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = stderr.read_to_string(&mut stderr_output);
+                let mut log_output = String::new();
+                if let Some(ref path) = self.log_path {
+                    if let Ok(content) = std::fs::read_to_string(path) {
+                        log_output = content;
+                    }
                 }
-                if stderr_output.is_empty() {
+                if log_output.is_empty() {
                     Some(format!("Server exited with {status}"))
                 } else {
-                    stderr_output.truncate(1000);
-                    Some(format!("Server crashed: {stderr_output}"))
+                    log_output.truncate(1000);
+                    Some(format!("Server crashed: {log_output}"))
                 }
             }
             _ => None,
@@ -247,8 +261,8 @@ pub fn is_server_ready_public() -> bool {
 
 /// Send a real HTTP GET /health and return true only if the response body is "ok".
 /// This prevents false positives when another service (e.g. a proxy) occupies the port.
-/// Unlike bare TCP polling, this completes the HTTP transaction so single-threaded
-/// Flask doesn't block waiting for a request that never arrives.
+/// Reads the full response (headers + body) because Windows TCP may split small
+/// HTTP responses across multiple segments, so a single read() can miss the body.
 fn is_server_ready() -> bool {
     use std::io::{Read, Write};
     use std::net::TcpStream;
@@ -261,13 +275,33 @@ fn is_server_ready() -> bool {
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
     let _ = stream.write_all(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
-    let mut buf = [0u8; 512];
-    let Ok(n) = stream.read(&mut buf) else {
-        return false;
-    };
-    let response = String::from_utf8_lossy(&buf[..n]);
-    // Check for HTTP 200 and body containing "ok"
+    // Read until connection closes (HTTP/1.0 closes after response)
+    let mut buf = Vec::with_capacity(512);
+    let mut tmp = [0u8; 512];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(_) => break,
+        }
+    }
+    let response = String::from_utf8_lossy(&buf);
     response.contains("200") && response.contains("ok")
+}
+
+/// Quick check: can Python import the required dependencies?
+/// Returns true if both flask and faster_whisper are importable.
+fn check_python_deps(exe: &str, pre_args: &[String]) -> bool {
+    let mut cmd = Command::new(exe);
+    cmd.args(pre_args);
+    cmd.args(["-c", "import flask; import faster_whisper"]);
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Find a working Python executable. Tries py -3.13, py -3.12, py, python3, python.

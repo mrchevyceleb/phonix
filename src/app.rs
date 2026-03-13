@@ -56,6 +56,9 @@ pub enum PipelineCmd {
 pub struct SharedFlags {
     pub long_dictate_active: bool,
     pub auto_paste: bool,
+    /// True while a paste operation is in progress. Blocks new recordings
+    /// to prevent ghost hotkey triggers from SetForegroundWindow.
+    pub paste_in_progress: bool,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -94,6 +97,8 @@ pub struct PhonixApp {
 
     // True when listening for a key press in Settings
     listening_for_key: bool,
+    // Tracks the combo being held during "Record a key" (e.g. "LeftCtrl+LeftShift")
+    pending_combo: Option<String>,
 
     // Update notification from GitHub releases: (version, url, download_url)
     update_info: Option<(String, String, String)>,
@@ -178,11 +183,12 @@ impl PhonixApp {
         }
 
         let startup_record_key = config.record_key.clone();
+        let initial_status = format!("Ready - hold {} to dictate", hotkey::format_hotkey_display(&config.record_key));
         Self {
             store,
             config,
             flags,
-            status: "Ready - hold key to dictate".to_string(),
+            status: initial_status,
             is_recording: false,
             active_tab: Tab::History,
             long_dictate_text: String::new(),
@@ -197,6 +203,7 @@ impl PhonixApp {
             force_quit: false,
             focus_long_dictate_text: false,
             listening_for_key: false,
+            pending_combo: None,
             update_info: None,
             update_dismissed: false,
             update_downloading: false,
@@ -310,7 +317,7 @@ impl eframe::App for PhonixApp {
                     crate::sound::play_stop_with_preset(&self.config.sound_preset);
                 }
                 AppEvent::Transcribed { text, raw, for_long_dictate } => {
-                    self.status = "Ready - hold key to dictate".into();
+                    self.status = format!("Ready - hold {} to dictate", hotkey::format_hotkey_display(&self.config.record_key));
                     if let Some(ref ov) = *self.overlay {
                         ov.set_state(crate::overlay::STATE_HIDDEN);
                     }
@@ -683,7 +690,7 @@ impl PhonixApp {
                 );
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new("Hold your record key and speak")
+                    RichText::new(format!("Hold {} and speak", hotkey::format_hotkey_display(&self.config.record_key)))
                         .size(13.0)
                         .color(Theme::TEXT_MUTED),
                 );
@@ -1025,38 +1032,64 @@ impl PhonixApp {
                                     });
                                 }
 
-                                // "Record key" press-any-key button
+                                // "Record a key" press-any-key button (supports combos)
                                 ui.add_space(4.0);
                                 if self.listening_for_key {
+                                    let display_text = if let Some(ref combo) = self.pending_combo {
+                                        hotkey::format_hotkey_display(combo)
+                                    } else {
+                                        "Press key(s)...".to_string()
+                                    };
                                     ui.horizontal(|ui| {
                                         ui.label(
-                                            RichText::new("Press a key...")
+                                            RichText::new(&display_text)
                                                 .size(12.0)
                                                 .color(Theme::ACCENT)
                                                 .strong(),
                                         );
                                         if ui.small_button("Cancel").clicked() {
                                             self.listening_for_key = false;
+                                            self.pending_combo = None;
                                         }
                                     });
-                                    // Poll for key press
-                                    if let Some(key) = crate::hotkey::detect_pressed_key() {
-                                        self.config.record_key = key.to_string();
+                                    // Poll for combo: track the widest set of keys held
+                                    if let Some(combo) = crate::hotkey::detect_pressed_combo() {
+                                        let new_count = combo.split('+').count();
+                                        let old_count = self.pending_combo.as_ref()
+                                            .map(|c| c.split('+').count())
+                                            .unwrap_or(0);
+                                        if new_count >= old_count {
+                                            self.pending_combo = Some(combo);
+                                        }
+                                    } else if self.pending_combo.is_some() {
+                                        // All keys released and we have a recorded combo: finalize
+                                        self.config.record_key = self.pending_combo.take().unwrap();
                                         self.listening_for_key = false;
                                     }
                                     ui.ctx().request_repaint();
                                 } else {
-                                    let record_btn = egui::Button::new(
-                                        RichText::new("Record a key")
+                                    ui.horizontal(|ui| {
+                                        let record_btn = egui::Button::new(
+                                            RichText::new("Record a combo")
+                                                .size(11.0)
+                                                .color(Theme::TEXT_SECONDARY),
+                                        )
+                                        .fill(Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::new(0.5, Theme::BORDER_SUBTLE))
+                                        .rounding(egui::Rounding::same(6.0));
+                                        if ui.add(record_btn).clicked() {
+                                            self.listening_for_key = true;
+                                            self.pending_combo = None;
+                                        }
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "Current: {}",
+                                                hotkey::format_hotkey_display(&self.config.record_key),
+                                            ))
                                             .size(11.0)
-                                            .color(Theme::TEXT_SECONDARY),
-                                    )
-                                    .fill(Color32::TRANSPARENT)
-                                    .stroke(egui::Stroke::new(0.5, Theme::BORDER_SUBTLE))
-                                    .rounding(egui::Rounding::same(6.0));
-                                    if ui.add(record_btn).clicked() {
-                                        self.listening_for_key = true;
-                                    }
+                                            .color(Theme::TEXT_MUTED),
+                                        );
+                                    });
                                 }
                             });
                             ui.end_row();
@@ -1471,7 +1504,10 @@ impl PhonixApp {
             if self.config.record_key != self.startup_record_key {
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("⚠ Record key changed. Restart the app for it to take effect.")
+                    RichText::new(format!(
+                        "⚠ Record key changed to {}. Restart the app for it to take effect.",
+                        hotkey::format_hotkey_display(&self.config.record_key),
+                    ))
                         .small()
                         .color(Color32::from_rgb(255, 190, 60)),
                 );

@@ -4,12 +4,8 @@ use anyhow::Result;
 ///
 /// Strategy:
 ///   1. Restore focus to `target_hwnd` (the window active at key-press time)
-///   2. Type each character via Unicode SendInput
-///
-/// We use Unicode keystroke injection rather than clipboard+Ctrl+V because it
-/// works in every app that accepts keyboard input — terminals, browsers,
-/// editors, games — without depending on the app supporting Ctrl+V or the
-/// clipboard being accessible.
+///   2. Clipboard + Shift+Insert (avoids Ctrl, which causes ghost double-paste
+///      when LeftCtrl is part of the hotkey combo)
 pub fn paste(text: &str, target_hwnd: u64) -> Result<()> {
     if target_hwnd != 0 {
         focus_window(target_hwnd);
@@ -42,89 +38,102 @@ fn focus_window(hwnd: u64) {
 }
 
 #[cfg(windows)]
-fn release_modifiers() {
+fn type_text(text: &str) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
 
-    // Left/Right Alt, Ctrl, Shift, Win.
-    // If any are still logically down when we inject text, the first character
-    // can be interpreted as a shortcut (e.g. Alt+F) and get swallowed.
-    let modifier_vks: [u16; 8] = [0xA4, 0xA5, 0xA2, 0xA3, 0xA0, 0xA1, 0x5B, 0x5C];
+    // Clipboard + Shift+Insert paste. Completely avoids Ctrl, which causes
+    // ghost double-paste when LeftCtrl is part of the hotkey combo.
+    // Shift+Insert is the universal Windows paste shortcut that predates
+    // Ctrl+V and works in virtually every app.
 
-    for vk in modifier_vks {
-        let is_down = unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 };
-        if !is_down {
-            continue;
+    // Save clipboard, set our text
+    let old_clipboard = arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut cb| cb.get_text().ok());
+
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        if cb.set_text(text).is_err() {
+            return;
         }
+    } else {
+        return;
+    }
 
-        let key_up = INPUT {
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Shift+Insert (no Ctrl involved at all)
+    let vk_shift: u16 = 0xA0;  // VK_LSHIFT
+    let vk_insert: u16 = 0x2D; // VK_INSERT
+
+    let inputs: [INPUT; 4] = [
+        // Shift down
+        INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(vk),
+                    wVk: VIRTUAL_KEY(vk_shift),
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        // Insert down
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk_insert),
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        // Insert up
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk_insert),
                     wScan: 0,
                     dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0),
                     time: 0,
                     dwExtraInfo: 0,
                 },
             },
-        };
+        },
+        // Shift up
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk_shift),
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+    ];
 
-        unsafe {
-            let _ = SendInput(&[key_up], std::mem::size_of::<INPUT>() as i32);
-        }
+    unsafe {
+        let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
 
-    // Let the target app process key-up events before typing starts.
-    std::thread::sleep(std::time::Duration::from_millis(25));
-}
+    // Wait for target app to process the paste
+    std::thread::sleep(std::time::Duration::from_millis(200));
 
-#[cfg(windows)]
-fn type_text(text: &str) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    };
-
-    release_modifiers();
-
-    // Encode as UTF-16. Surrogate pairs (emoji, etc.) need two events each.
-    let utf16: Vec<u16> = text.encode_utf16().collect();
-
-    for &codeunit in &utf16 {
-        let inputs: [INPUT; 2] = [
-            // Key down
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
-                        wScan: codeunit,
-                        dwFlags: KEYEVENTF_UNICODE,
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
-            },
-            // Key up
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
-                        wScan: codeunit,
-                        dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0),
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
-            },
-        ];
-
-        unsafe {
-            let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    // Restore original clipboard
+    if let Some(old_text) = old_clipboard {
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            let _ = cb.set_text(&old_text);
         }
     }
 }

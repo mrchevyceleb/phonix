@@ -89,7 +89,8 @@ fn vk_for_name(name: &str) -> i32 {
 }
 
 /// Check which supported key is currently pressed. Returns the config name if any.
-/// Used by the Settings UI for "press any key" recording.
+/// Kept for backward compatibility; prefer `detect_pressed_combo` for combo support.
+#[allow(dead_code)]
 pub fn detect_pressed_key() -> Option<&'static str> {
     for &(config_name, _) in supported_keys() {
         let vk = vk_for_name(config_name);
@@ -100,24 +101,89 @@ pub fn detect_pressed_key() -> Option<&'static str> {
     None
 }
 
+/// Detect all currently-pressed supported keys and return them as a `+`-joined
+/// combo string (e.g. `"LeftCtrl+LeftShift"`). Keys are sorted in SUPPORTED_KEYS
+/// order for consistency. Returns None if no supported key is pressed.
+pub fn detect_pressed_combo() -> Option<String> {
+    let pressed: Vec<&str> = supported_keys()
+        .iter()
+        .filter(|&&(name, _)| is_key_down(vk_for_name(name)))
+        .map(|&(name, _)| name)
+        .collect();
+    if pressed.is_empty() {
+        None
+    } else {
+        Some(pressed.join("+"))
+    }
+}
+
+/// Check whether a `+`-separated key string is valid (each part is a known key name).
+pub fn is_valid_key_combo(key_str: &str) -> bool {
+    key_str.split('+').all(|part| {
+        let trimmed = part.trim();
+        SUPPORTED_KEYS.iter().any(|&(name, _)| name == trimmed)
+    })
+}
+
+/// Format a `+`-separated config key string into a display-friendly label.
+pub fn format_hotkey_display(record_key: &str) -> String {
+    record_key
+        .split('+')
+        .map(|k| {
+            let k = k.trim();
+            supported_keys()
+                .iter()
+                .find(|&&(name, _)| name == k)
+                .map(|&(_, label)| label)
+                .unwrap_or(k)
+        })
+        .collect::<Vec<_>>()
+        .join(" + ")
+}
+
 /// Spawn a background thread that polls `GetAsyncKeyState` every 20ms.
 /// On key-down, captures the foreground window so paste can restore focus.
-pub fn start_polling(key_name: String, tx: Sender<HotkeyEvent>) {
+///
+/// `paste_guard` is set by the pipeline thread during (and briefly after)
+/// paste operations. While true, all key events are suppressed so ghost
+/// keypresses from SetForegroundWindow/SendInput don't trigger recordings.
+pub fn start_polling(
+    key_name: String,
+    tx: Sender<HotkeyEvent>,
+    paste_guard: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+
     std::thread::Builder::new()
         .name("phonix-hotkey".into())
         .spawn(move || {
-            let vk = vk_for_name(&key_name);
+            let vks: Vec<i32> = key_name
+                .split('+')
+                .map(|k| vk_for_name(k.trim()))
+                .collect();
             let mut held = false;
             // Cooldown after RecordStop to ignore ghost keypresses caused by
             // SetForegroundWindow / SendInput during paste (prevents double-fire).
             let mut cooldown_until: Option<std::time::Instant> = None;
 
             loop {
-                let pressed = is_key_down(vk);
+                let pressed = vks.iter().all(|&vk| is_key_down(vk));
 
-                // Skip events during cooldown
+                // Suppress all events while paste is in progress (or cooling down).
+                // Do NOT reset `held` here -- we want to preserve the held/released
+                // state so that when the guard clears we don't see a stale key-down
+                // as a new press. Instead, track the physical state silently.
+                if paste_guard.load(Ordering::Relaxed) {
+                    // Track physical state but don't emit events
+                    held = pressed;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                }
+
+                // Skip events during cooldown (also track physical state silently)
                 if let Some(deadline) = cooldown_until {
                     if std::time::Instant::now() < deadline {
+                        held = pressed;
                         std::thread::sleep(std::time::Duration::from_millis(20));
                         continue;
                     }
