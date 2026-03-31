@@ -183,6 +183,10 @@ pub struct Config {
     ///          "RightShift", "LeftShift", "CapsLock", "ScrollLock", "F13"–"F16"
     pub record_key: String,
 
+    /// Input device name. Empty = system default microphone.
+    #[serde(default)]
+    pub microphone: String,
+
     /// Automatically paste into the active window after transcription
     pub auto_paste: bool,
 
@@ -237,6 +241,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             record_key: if cfg!(target_os = "macos") { "F13" } else { "RightAlt" }.to_string(),
+            microphone: String::new(),
             auto_paste: true,
             sound_preset: SoundPreset::Ping,
             sound_enabled: true, // legacy default

@@ -49,6 +49,8 @@ pub enum AppEvent {
 pub enum PipelineCmd {
     StartRecording,
     StopRecording,
+    /// Switch the input device. Empty string = system default.
+    SwitchMic(String),
 }
 
 //── Shared state pipeline needs to read from UI ───────────────────────────────
@@ -87,7 +89,7 @@ pub struct PhonixApp {
     tray: Option<tray_icon::TrayIcon>,
 
     // Native always-on-top recording overlay (shared with pipeline thread)
-    overlay: Arc<Option<crate::overlay::Overlay>>,
+    overlay: Arc<std::sync::OnceLock<crate::overlay::Overlay>>,
 
     // Track the record key at startup so we can show a restart warning on change
     startup_record_key: String,
@@ -99,6 +101,11 @@ pub struct PhonixApp {
     listening_for_key: bool,
     // Tracks the combo being held during "Record a key" (e.g. "LeftCtrl+LeftShift")
     pending_combo: Option<String>,
+
+    // Cached list of audio input devices (name, is_default)
+    input_devices: Vec<(String, bool)>,
+    // When the device list was last refreshed
+    devices_refreshed: Instant,
 
     // Update notification from GitHub releases: (version, url, download_url)
     update_info: Option<(String, String, String)>,
@@ -132,7 +139,7 @@ impl PhonixApp {
         cmd_tx: Sender<PipelineCmd>,
         tray: Option<tray_icon::TrayIcon>,
         tray_menu_ids: Option<crate::TrayMenuIds>,
-        overlay: Arc<Option<crate::overlay::Overlay>>,
+        overlay: Arc<std::sync::OnceLock<crate::overlay::Overlay>>,
     ) -> Self {
         Self::setup_theme(&cc.egui_ctx);
 
@@ -204,6 +211,8 @@ impl PhonixApp {
             focus_long_dictate_text: false,
             listening_for_key: false,
             pending_combo: None,
+            input_devices: crate::audio::list_input_devices(),
+            devices_refreshed: Instant::now(),
             update_info: None,
             update_dismissed: false,
             update_downloading: false,
@@ -302,23 +311,23 @@ impl eframe::App for PhonixApp {
                     self.is_recording = true;
                     self.status = "Recording...".into();
                     self.set_tray_recording(true);
-                    if let Some(ref ov) = *self.overlay {
+                    if let Some(ov) = self.overlay.get() {
                         ov.set_state(crate::overlay::STATE_RECORDING);
                     }
-                    crate::sound::play_start_with_preset(&self.config.sound_preset);
+                    // Sound played in pipeline thread for lower latency
                 }
                 AppEvent::RecordingStopped => {
                     self.is_recording = false;
                     self.status = "Transcribing...".into();
                     self.set_tray_recording(false);
-                    if let Some(ref ov) = *self.overlay {
+                    if let Some(ov) = self.overlay.get() {
                         ov.set_state(crate::overlay::STATE_TRANSCRIBING);
                     }
-                    crate::sound::play_stop_with_preset(&self.config.sound_preset);
+                    // Sound played in pipeline thread for lower latency
                 }
                 AppEvent::Transcribed { text, raw, for_long_dictate } => {
                     self.status = format!("Ready - hold {} to dictate", hotkey::format_hotkey_display(&self.config.record_key));
-                    if let Some(ref ov) = *self.overlay {
+                    if let Some(ov) = self.overlay.get() {
                         ov.set_state(crate::overlay::STATE_HIDDEN);
                     }
                     if for_long_dictate {
@@ -331,7 +340,7 @@ impl eframe::App for PhonixApp {
                     self.store.lock().unwrap().push(Entry::new(text, raw));
                 }
                 AppEvent::StatusUpdate(ref s) => {
-                    if let Some(ref ov) = *self.overlay {
+                    if let Some(ov) = self.overlay.get() {
                         if s.contains("Cleaning") {
                             ov.set_state(crate::overlay::STATE_CLEANING);
                         } else if s.contains("Transcribing") {
@@ -343,7 +352,7 @@ impl eframe::App for PhonixApp {
                     self.status = s.clone();
                 }
                 AppEvent::Error(e) => {
-                    if let Some(ref ov) = *self.overlay {
+                    if let Some(ov) = self.overlay.get() {
                         ov.set_state(crate::overlay::STATE_HIDDEN);
                     }
                     self.status = format!("Error: {e}");
@@ -1091,6 +1100,54 @@ impl PhonixApp {
                                         );
                                     });
                                 }
+                            });
+                            ui.end_row();
+
+                            ui.label(
+                                RichText::new("Microphone")
+                                    .color(Theme::TEXT_SECONDARY),
+                            );
+                            ui.vertical(|ui| {
+                                // Refresh device list every 3 seconds
+                                if self.devices_refreshed.elapsed().as_secs() >= 3 {
+                                    self.input_devices = crate::audio::list_input_devices();
+                                    self.devices_refreshed = Instant::now();
+                                }
+                                let device_missing = !self.config.microphone.is_empty()
+                                    && !self.input_devices.iter().any(|(n, _)| n == &self.config.microphone);
+                                let current_label = if self.config.microphone.is_empty() {
+                                    let default_name = self.input_devices.iter()
+                                        .find(|(_, is_default)| *is_default)
+                                        .map(|(name, _)| name.as_str())
+                                        .unwrap_or("no device found");
+                                    format!("System default ({default_name})")
+                                } else if device_missing {
+                                    format!("{} (disconnected)", self.config.microphone)
+                                } else {
+                                    self.config.microphone.clone()
+                                };
+                                ui.add_enabled_ui(!self.is_recording, |ui| {
+                                egui::ComboBox::from_id_source("mic_select")
+                                    .selected_text(RichText::new(&current_label).size(12.0))
+                                    .width(ui.available_width() - 8.0)
+                                    .show_ui(ui, |ui| {
+                                        // "System default" option
+                                        let default_name = self.input_devices.iter()
+                                            .find(|(_, is_default)| *is_default)
+                                            .map(|(name, _)| name.as_str())
+                                            .unwrap_or("None");
+                                        let label = format!("System default ({default_name})");
+                                        if ui.selectable_value(&mut self.config.microphone, String::new(), &label).changed() {
+                                            let _ = self.cmd_tx.try_send(PipelineCmd::SwitchMic(String::new()));
+                                        }
+                                        // Each detected device
+                                        for (name, _) in &self.input_devices {
+                                            if ui.selectable_value(&mut self.config.microphone, name.clone(), name).changed() {
+                                                let _ = self.cmd_tx.try_send(PipelineCmd::SwitchMic(name.clone()));
+                                            }
+                                        }
+                                    });
+                                }); // add_enabled_ui
                             });
                             ui.end_row();
 

@@ -15,6 +15,24 @@ const PRE_ROLL_SECS: f32 = 1.5;
 /// stream dead and reopen the mic.
 const STREAM_STALE_SECS: u64 = 2;
 
+/// List available audio input devices. Returns `(name, is_default)` pairs.
+pub fn list_input_devices() -> Vec<(String, bool)> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.name().ok());
+    let mut devices: Vec<(String, bool)> = Vec::new();
+    if let Ok(iter) = host.input_devices() {
+        for dev in iter {
+            if let Ok(name) = dev.name() {
+                let is_default = default_name.as_deref() == Some(&name);
+                devices.push((name, is_default));
+            }
+        }
+    }
+    devices
+}
+
 pub struct AudioRecorder {
     stream: Option<Stream>,
     /// Rolling ring buffer — always capturing, capped at PRE_ROLL_SECS
@@ -26,6 +44,8 @@ pub struct AudioRecorder {
     last_callback: Arc<AtomicU64>,
     pub sample_rate: u32,
     channels: usize,
+    /// Name of the selected device (empty = system default)
+    device_name: String,
 }
 
 unsafe impl Send for AudioRecorder {}
@@ -40,16 +60,38 @@ impl AudioRecorder {
             last_callback: Arc::new(AtomicU64::new(0)),
             sample_rate: 44100,
             channels: 1,
+            device_name: String::new(),
         }
+    }
+
+    /// Set the desired input device by name. Empty string = system default.
+    /// Call `reopen()` afterward to apply the change.
+    pub fn set_device(&mut self, name: &str) {
+        self.device_name = name.to_string();
+    }
+
+    /// Reopen the mic stream with the currently configured device.
+    /// Drops the old stream first so OS releases the device.
+    pub fn reopen(&mut self) -> Result<u32> {
+        self.stream = None;
+        self.last_callback.store(0, Ordering::Relaxed);
+        // Clear stale pre-roll from the old device/sample rate
+        self.pre_roll.lock().unwrap().clear();
+        self.open()
     }
 
     /// Open the mic and start the always-on pre-roll buffer.
     /// Call this once at app startup, not on every keypress.
     pub fn open(&mut self) -> Result<u32> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .context("No microphone found")?;
+        let device = if self.device_name.is_empty() {
+            host.default_input_device()
+                .context("No microphone found")?
+        } else {
+            host.input_devices()?
+                .find(|d| d.name().ok().as_deref() == Some(&self.device_name))
+                .context(format!("Microphone '{}' not found", self.device_name))?
+        };
 
         let supported = device.default_input_config()?;
         self.sample_rate = supported.sample_rate().0;
@@ -123,8 +165,9 @@ impl AudioRecorder {
             return None;
         }
         eprintln!("[phonix/audio] stream stale — reopening mic");
-        // Drop old stream before opening a new one
+        // Drop old stream and stale pre-roll before opening a new one
         self.stream = None;
+        self.pre_roll.lock().unwrap().clear();
         match self.open() {
             Ok(sr) => Some(sr),
             Err(e) => {

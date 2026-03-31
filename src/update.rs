@@ -150,12 +150,15 @@ pub fn install_and_restart(installer_path: &str) {
     #[cfg(windows)]
     {
         use std::process::Command;
-        // Launch the Inno Setup installer; it handles closing the old process
+        // Launch the Inno Setup installer silently. The installer has
+        // CloseApplications=force so it will close this process, install
+        // the update, and relaunch Phonix automatically.
         let _ = Command::new(installer_path)
             .arg("/SILENT")
             .spawn();
-        // Give the installer a moment to start, then exit
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Give the installer a moment to start, then exit so it can
+        // replace the binary.
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         std::process::exit(0);
     }
 

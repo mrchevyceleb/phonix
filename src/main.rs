@@ -14,7 +14,7 @@ mod store;
 mod update;
 mod whisper;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use app::{AppEvent, PhonixApp, PipelineCmd, SharedFlags};
@@ -77,11 +77,16 @@ fn main() -> eframe::Result<()> {
     }
 
     // ── Recording overlay (native always-on-top window) ─────────────────────
-    // Created before the pipeline so both the pipeline thread and the UI can
-    // set overlay state. The overlay polls an AtomicU8 so set_state is safe
-    // from any thread.
-    let rec_overlay = overlay::Overlay::new();
-    let shared_overlay: Arc<Option<overlay::Overlay>> = Arc::new(rec_overlay);
+    // On macOS, NSWindow creation must happen AFTER winit/eframe initializes
+    // NSApplication. We use OnceLock and initialize it inside the eframe
+    // closure. On other platforms, we initialize it immediately.
+    let shared_overlay: Arc<OnceLock<overlay::Overlay>> = Arc::new(OnceLock::new());
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(ov) = overlay::Overlay::new() {
+            let _ = shared_overlay.set(ov);
+        }
+    }
 
     // ── Paste guard ──────────────────────────────────────────────────────────
     // Shared AtomicBool that suppresses hotkey events during (and briefly
@@ -112,6 +117,13 @@ fn main() -> eframe::Result<()> {
                     .build()
                     .expect("http client");
                 let mut recorder = AudioRecorder::new();
+                // Apply saved microphone preference
+                {
+                    let cfg = Config::load();
+                    if !cfg.microphone.is_empty() {
+                        recorder.set_device(&cfg.microphone);
+                    }
+                }
                 let mut sample_rate = 44100u32;
                 let mut recording = false;
                 let mut target_hwnd: u64 = 0;
@@ -124,7 +136,7 @@ fn main() -> eframe::Result<()> {
 
                 // Helper: set overlay state from the pipeline thread
                 let set_overlay = |state: u8| {
-                    if let Some(ref ov) = *pipeline_overlay {
+                    if let Some(ov) = pipeline_overlay.get() {
                         ov.set_state(state);
                     }
                 };
@@ -147,7 +159,7 @@ fn main() -> eframe::Result<()> {
                                            long_dictate: bool,
                                            event_tx: &crossbeam_channel::Sender<AppEvent>,
                                            flags: &Arc<Mutex<SharedFlags>>,
-                                           overlay: &Arc<Option<overlay::Overlay>>,
+                                           overlay: &Arc<OnceLock<overlay::Overlay>>,
                                            client: &reqwest::Client,
                                            paste_guard: &Arc<AtomicBool>,
                                            last_done: &Arc<AtomicU64>| {
@@ -164,7 +176,7 @@ fn main() -> eframe::Result<()> {
 
                     rt.spawn(async move {
                         let hide_overlay = || {
-                            if let Some(ref o) = *ov {
+                            if let Some(o) = ov.get() {
                                 o.set_state(overlay::STATE_HIDDEN);
                             }
                         };
@@ -205,7 +217,7 @@ fn main() -> eframe::Result<()> {
                         }
 
                         let text = if cfg.cleanup_enabled {
-                            if let Some(ref o) = *ov {
+                            if let Some(o) = ov.get() {
                                 o.set_state(overlay::STATE_CLEANING);
                             }
                             let _ = tx.try_send(AppEvent::StatusUpdate("Cleaning up\u{2026}".into()));
@@ -361,6 +373,29 @@ fn main() -> eframe::Result<()> {
                                     &paste_guard, &last_done,
                                 );
                             }
+                            PipelineCmd::SwitchMic(ref name) if !recording => {
+                                recorder.set_device(name);
+                                match recorder.reopen() {
+                                    Ok(sr) => {
+                                        sample_rate = sr;
+                                        let label = if name.is_empty() { "System default" } else { name };
+                                        let _ = event_tx.try_send(AppEvent::StatusUpdate(
+                                            format!("Switched mic: {label}"),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        let _ = event_tx.try_send(AppEvent::Error(
+                                            format!("Mic switch failed: {e}"),
+                                        ));
+                                    }
+                                }
+                            }
+                            PipelineCmd::SwitchMic(_) => {
+                                // Reject mic switch while recording
+                                let _ = event_tx.try_send(AppEvent::StatusUpdate(
+                                    "Can't switch mic while recording".into(),
+                                ));
+                            }
                             _ => {}
                         }
                     }
@@ -370,9 +405,6 @@ fn main() -> eframe::Result<()> {
             })
             .expect("failed to spawn pipeline thread");
     }
-
-    // ── System tray ───────────────────────────────────────────────────────────
-    let (tray, tray_menu_ids) = build_tray();
 
     // ── egui window ───────────────────────────────────────────────────────────
     let store_for_app = Arc::clone(&store);
@@ -392,6 +424,18 @@ fn main() -> eframe::Result<()> {
             ..Default::default()
         },
         Box::new(move |cc| {
+            // Build tray and overlay INSIDE the eframe closure so winit owns
+            // NSApplication first. On macOS, tray_icon and cocoa NSWindow
+            // creation initialize NSApplication which conflicts with winit.
+            let (tray, tray_menu_ids) = build_tray();
+
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(ov) = overlay::Overlay::new() {
+                    let _ = overlay_for_app.set(ov);
+                }
+            }
+
             Ok(Box::new(PhonixApp::new(
                 cc,
                 store_for_app,
