@@ -230,6 +230,11 @@ pub struct Config {
     #[serde(default)]
     pub cleanup_model_override: String,
 
+    /// Version string the user dismissed with "Later" — suppresses the banner
+    /// for this specific version until a newer one is released.
+    #[serde(default)]
+    pub update_dismissed_version: String,
+
     // Legacy fields kept for backwards-compatible deserialization
     #[serde(default, rename = "cleanup_url", skip_serializing)]
     _cleanup_url_legacy: String,
@@ -258,6 +263,7 @@ impl Default for Config {
             cleanup_url_override: String::new(),
             cleanup_api_key: String::new(),
             cleanup_model_override: String::new(),
+            update_dismissed_version: String::new(),
             _cleanup_url_legacy: String::new(),
             _cleanup_model_legacy: String::new(),
         }

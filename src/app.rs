@@ -502,6 +502,10 @@ impl PhonixApp {
                                 .rounding(egui::Rounding::same(4.0)),
                             ).clicked() {
                                 self.update_dismissed = true;
+                                // Persist so this version isn't shown again on restart
+                                let mut cfg = Config::load();
+                                cfg.update_dismissed_version = version.clone();
+                                let _ = cfg.save();
                             }
                             if ui.add(
                                 egui::Button::new(
@@ -545,6 +549,10 @@ impl PhonixApp {
                                 .clicked()
                             {
                                 self.update_dismissed = true;
+                                // Persist so this version isn't shown again on restart
+                                let mut cfg = Config::load();
+                                cfg.update_dismissed_version = version.clone();
+                                let _ = cfg.save();
                             }
 
                             if !download_url.is_empty() {

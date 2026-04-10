@@ -1,5 +1,6 @@
 use crossbeam_channel::Sender;
 use crate::app::AppEvent;
+use crate::config::Config;
 
 const GITHUB_RELEASES_URL: &str =
     "https://api.github.com/repos/mrchevyceleb/phonix/releases/latest";
@@ -48,6 +49,11 @@ async fn check_inner(event_tx: &Sender<AppEvent>) -> Result<(), Box<dyn std::err
     let download_url = find_platform_asset(&resp).unwrap_or_default();
 
     if is_newer(remote_version, CURRENT_VERSION) {
+        // Don't nag if the user already dismissed this exact version
+        let config = Config::load();
+        if config.update_dismissed_version == remote_version {
+            return Ok(());
+        }
         let _ = event_tx.try_send(AppEvent::UpdateAvailable {
             version: remote_version.to_string(),
             url: url.to_string(),
