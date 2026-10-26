@@ -20,9 +20,29 @@ import tempfile
 # ctranslate2 needs CUDA 12.x DLLs on PATH. We check common install locations
 # and register whichever we find. Safe to skip if not on Windows or no CUDA.
 
+def _add_dll_dir(path):
+    # ctranslate2 loads cuBLAS/cuDNN lazily via LoadLibrary, which searches PATH,
+    # so register both ways.
+    os.add_dll_directory(path)
+    os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
+
 def _register_cuda():
+    """Returns True if CUDA 12.x DLLs were found and registered."""
     if sys.platform != "win32":
-        return
+        return True
+    # pip-installed runtime (nvidia-cublas-cu12, nvidia-cudnn-cu12): site-packages/nvidia/*/bin
+    import site
+    pip_bins = []
+    for sp in site.getsitepackages() + [site.getusersitepackages()]:
+        nv = os.path.join(sp, "nvidia")
+        if os.path.isdir(nv):
+            pip_bins += [os.path.join(nv, d, "bin") for d in os.listdir(nv)
+                         if os.path.isdir(os.path.join(nv, d, "bin"))]
+    if any(os.path.exists(os.path.join(b, "cublas64_12.dll")) for b in pip_bins):
+        for b in pip_bins:
+            _add_dll_dir(b)
+        print(f"[whisper-server] CUDA DLLs: pip nvidia packages ({len(pip_bins)} dirs)")
+        return True
     cuda_candidates = [
         r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin",
         r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\bin",
@@ -34,12 +54,13 @@ def _register_cuda():
     ]
     for path in cuda_candidates:
         if os.path.exists(path):
-            os.add_dll_directory(path)
+            _add_dll_dir(path)
             print(f"[whisper-server] CUDA DLLs: {path}")
-            return
+            return True
     print("[whisper-server] No CUDA 12.x found — falling back to CPU")
+    return False
 
-_register_cuda()
+cuda_available = _register_cuda()
 
 # ── Imports (after CUDA registration) ────────────────────────────────────────
 
@@ -58,8 +79,8 @@ parser.add_argument("--port",   type=int, default=8080,
                     help="Port to listen on (default: 8080)")
 args = parser.parse_args()
 
-device  = "cpu" if args.cpu else "cuda"
-compute = "int8" if args.cpu else "float16"
+device  = "cpu" if args.cpu or not cuda_available else "cuda"
+compute = "int8" if device == "cpu" else "float16"
 
 # ── Load model ────────────────────────────────────────────────────────────────
 
@@ -108,6 +129,43 @@ app = Flask(__name__)
 def health():
     return "ok"
 
+def load_audio(path):
+    """Decode Phonix's 16-bit PCM WAV to a 16 kHz float32 array.
+    Bypasses faster-whisper's PyAV decoder, which breaks whenever PyAV ships an
+    incompatible release (e.g. av 16+ dropped the metadata_errors kwarg).
+    Falls back to the path (PyAV decode) for anything that isn't plain PCM WAV."""
+    import wave
+    import numpy as np
+    try:
+        with wave.open(path, "rb") as w:
+            if w.getsampwidth() != 2:
+                return path
+            rate, channels = w.getframerate(), w.getnchannels()
+            pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+    except wave.Error:
+        return path
+    audio = pcm.astype(np.float32) / 32768.0
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    if rate != 16000 and len(audio):
+        n_out = int(len(audio) * 16000 / rate)
+        audio = np.interp(
+            np.linspace(0, len(audio) - 1, n_out), np.arange(len(audio)), audio
+        ).astype(np.float32)
+    return audio
+
+def run_transcribe(audio_in):
+    segments, _ = model.transcribe(
+        audio_in,
+        language="en",
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters=dict(
+            speech_pad_ms=800,
+        ),
+    )
+    return " ".join(seg.text.strip() for seg in segments).strip()
+
 @app.route("/v1/audio/transcriptions", methods=["POST"])
 @app.route("/audio/transcriptions", methods=["POST"])
 def transcribe():
@@ -122,17 +180,20 @@ def transcribe():
         audio.save(tmp.name)
         tmp_path = tmp.name
 
+    global model
     try:
-        segments, _ = model.transcribe(
-            tmp_path,
-            language="en",
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters=dict(
-                speech_pad_ms=800,
-            ),
-        )
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        audio_in = load_audio(tmp_path)
+        try:
+            text = run_transcribe(audio_in)
+        except RuntimeError as e:
+            # CUDA libs can load at model init but fail on first use (missing
+            # cuBLAS/cuDNN). Switch to CPU for the rest of the session and retry.
+            if device == "cpu" or getattr(model, "_phonix_cpu", False):
+                raise
+            print(f"[whisper-server] GPU inference failed ({e}) — switching to CPU")
+            model = WhisperModel(args.model, device="cpu", compute_type="int8")
+            model._phonix_cpu = True
+            text = run_transcribe(audio_in)
     finally:
         os.unlink(tmp_path)
 
